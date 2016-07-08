@@ -220,7 +220,7 @@ class User(AccessControlledModel):
             self.save(user)
 
     def createUser(self, login, password, firstName, lastName, email,
-                   admin=False, public=True):
+                   admin=False, public=False):
         """
         Create a new user with the given information. The user will be created
         with the default "Public" and "Private" folders.
