@@ -17,23 +17,26 @@
 #  limitations under the License.
 ###############################################################################
 
-import cherrypy
+from hashlib import sha512
 import os
 import psutil
 import shutil
 import six
+from six import BytesIO
 import stat
 import tempfile
 
-from six import BytesIO
-from hashlib import sha512
+from girder import events, logger
+from girder.api.rest import setResponseHeader
+from girder.models.model_base import ValidationException, GirderException
+from girder.utility import mkdir, progress
 from . import hash_state
 from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
-from girder.models.model_base import ValidationException, GirderException
-from girder import events, logger
-from girder.utility import mkdir, progress
 
 BUF_SIZE = 65536
+
+# Default permissions for the files written to the filesystem
+DEFAULT_PERMS = stat.S_IRUSR | stat.S_IWUSR
 
 
 class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
@@ -69,6 +72,23 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
         if not os.access(doc['root'], os.W_OK):
             raise ValidationException(
                 'Unable to write into directory "%s".' % doc['root'])
+
+        if not doc.get('perms'):
+            doc['perms'] = DEFAULT_PERMS
+        else:
+            try:
+                perms = doc['perms']
+                if not isinstance(perms, int):
+                    perms = int(doc['perms'], 8)
+
+                # Make sure that mode is still rw for user
+                if not perms & stat.S_IRUSR or not perms & stat.S_IWUSR:
+                    raise ValidationException(
+                        'File permissions must allow "rw" for user.')
+                doc['perms'] = perms
+            except ValueError:
+                raise ValidationException(
+                    'File permissions must be an octal integer.')
 
     @staticmethod
     def fileIndexFields():
@@ -206,7 +226,7 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
             # shutil.move works across filesystems
             shutil.move(upload['tempFile'], abspath)
             try:
-                os.chmod(abspath, stat.S_IRUSR | stat.S_IWUSR)
+                os.chmod(abspath, self.assetstore.get('perms', DEFAULT_PERMS))
             except OSError:
                 # some filesystems may not support POSIX permissions
                 pass
@@ -244,7 +264,7 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
                 'file-does-not-exist')
 
         if headers:
-            cherrypy.response.headers['Accept-Ranges'] = 'bytes'
+            setResponseHeader('Accept-Ranges', 'bytes')
             self.setContentHeaders(file, offset, endByte, contentDisposition)
 
         def stream():
@@ -320,17 +340,17 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
         file['imported'] = True
         return self.model('file').save(file)
 
-    def _importDataAsItem(self, name, user, folder, path, files,
-                          reuseExisting=True):
+    def _importDataAsItem(self, name, user, folder, path, files, reuseExisting=True, params=None):
+        params = params or {}
         item = self.model('item').createItem(
-            name=name, creator=user, folder=folder,
-            reuseExisting=reuseExisting)
+            name=name, creator=user, folder=folder, reuseExisting=reuseExisting)
         events.trigger('filesystem_assetstore_imported',
                        {'id': item['_id'], 'type': 'item',
                         'importPath': path})
         for fname in files:
-            self.importFile(item, os.path.join(path, fname),
-                            user, name=fname)
+            fpath = os.path.join(path, fname)
+            if self.shouldImportFile(fpath, params):
+                self.importFile(item, fpath, user, name=fname)
 
     def _hasOnlyFiles(self, path, files):
         return all(os.path.isfile(os.path.join(path, name)) for name in files)
@@ -338,8 +358,7 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
     def _importFileToFolder(self, name, user, parent, parentType, path):
         if parentType != 'folder':
             raise ValidationException(
-                'Files cannot be imported directly underneath a %s.' %
-                parentType)
+                'Files cannot be imported directly underneath a %s.' % parentType)
 
         item = self.model('item').createItem(
             name=name, creator=user, folder=parent, reuseExisting=True)
@@ -350,8 +369,7 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
         })
         self.importFile(item, path, user, name=name)
 
-    def importData(self, parent, parentType, params, progress, user,
-                   leafFoldersAsItems):
+    def importData(self, parent, parentType, params, progress, user, leafFoldersAsItems):
         importPath = params['importPath']
 
         if not os.path.exists(importPath):
@@ -364,8 +382,9 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
 
         listDir = os.listdir(importPath)
         if leafFoldersAsItems and self._hasOnlyFiles(importPath, listDir):
-            self._importDataAsItem(os.path.basename(importPath.rstrip(os.sep)),
-                                   user, parent, importPath, listDir)
+            self._importDataAsItem(
+                os.path.basename(importPath.rstrip(os.sep)), user, parent, importPath,
+                listDir, params=params)
             return
 
         for name in listDir:
@@ -374,24 +393,25 @@ class FilesystemAssetstoreAdapter(AbstractAssetstoreAdapter):
 
             if os.path.isdir(path):
                 localListDir = os.listdir(path)
-                if leafFoldersAsItems and self._hasOnlyFiles(
-                        path, localListDir):
-                    self._importDataAsItem(name, user, parent, path,
-                                           localListDir)
+                if leafFoldersAsItems and self._hasOnlyFiles(path, localListDir):
+                    self._importDataAsItem(name, user, parent, path, localListDir, params=params)
                 else:
                     folder = self.model('folder').createFolder(
                         parent=parent, name=name, parentType=parentType,
                         creator=user, reuseExisting=True)
                     events.trigger(
-                        'filesystem_assetstore_imported',
-                        {'id': folder['_id'], 'type': 'folder',
-                         'importPath': path})
-                    self.importData(folder, 'folder', params={
-                        'importPath': os.path.join(importPath, name)},
-                        progress=progress, user=user,
-                        leafFoldersAsItems=leafFoldersAsItems)
+                        'filesystem_assetstore_imported', {
+                            'id': folder['_id'],
+                            'type': 'folder',
+                            'importPath': path
+                        })
+                    nextPath = os.path.join(importPath, name)
+                    self.importData(
+                        folder, 'folder', params=dict(params, importPath=nextPath),
+                        progress=progress, user=user, leafFoldersAsItems=leafFoldersAsItems)
             else:
-                self._importFileToFolder(name, user, parent, parentType, path)
+                if self.shouldImportFile(path, params):
+                    self._importFileToFolder(name, user, parent, parentType, path)
 
     def findInvalidFiles(self, progress=progress.noProgress, filters=None,
                          checkSize=True, **kwargs):

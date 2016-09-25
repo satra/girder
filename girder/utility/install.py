@@ -22,6 +22,7 @@ into the current Girder installation.  Note that Girder must
 be restarted for these changes to take effect.
 """
 
+import sys
 import os
 import pip
 import shutil
@@ -32,6 +33,10 @@ from girder.utility.plugin_utilities import getPluginDir
 
 version = constants.VERSION['apiVersion']
 webRoot = os.path.join(constants.STATIC_ROOT_DIR, 'clients', 'web')
+
+# monkey patch shutil for python < 3
+if sys.version_info[0] == 2:
+    import shutilwhich  # noqa
 
 
 def print_version(parser):
@@ -62,6 +67,14 @@ def runNpmInstall(wd=None, dev=False, npm='npm'):
     """
     Use this to run `npm install` inside the package.
     """
+    if shutil.which(npm) is None:
+        print(constants.TerminalColor.error(
+            'No npm executable was detected.  Please ensure the npm '
+            'executable is in your path, or use the "--npm" option to '
+            'provide a custom path.'
+        ))
+        raise Exception('npm executable not found')
+
     wd = wd or constants.PACKAGE_DIR
 
     args = (npm, 'install', '--production', '--unsafe-perm') if not dev \
@@ -107,19 +120,17 @@ def install_plugin(opts):
         if not os.path.isdir(pluginPath):
             raise Exception('Invalid plugin directory: %s' % pluginPath)
 
-        requirements = [os.path.join(pluginPath, 'requirements.txt')]
-        if opts.development:
-            requirements.extend([os.path.join(pluginPath,
-                                              'requirements-dev.txt')])
-        for reqs in requirements:
-            if os.path.isfile(reqs):
-                print(constants.TerminalColor.info(
-                    'Installing pip requirements for %s from %s.' %
-                    (name, reqs)))
+        if not opts.skip_requirements:
+            requirements = [os.path.join(pluginPath, 'requirements.txt')]
+            if opts.development:
+                requirements.append(os.path.join(pluginPath, 'requirements-dev.txt'))
+            for reqs in requirements:
+                if os.path.isfile(reqs):
+                    print(constants.TerminalColor.info(
+                        'Installing pip requirements for %s from %s.' % (name, reqs)))
 
-                if pip.main(['install', '-r', reqs]) != 0:
-                    raise Exception(
-                        'Failed to install pip requirements at %s.' % reqs)
+                    if pip.main(['install', '-r', reqs]) != 0:
+                        raise Exception('Failed to install pip requirements at %s.' % reqs)
 
         targetPath = os.path.join(getPluginDir(), name)
 
@@ -142,15 +153,16 @@ def install_plugin(opts):
                     shutil.rmtree(targetPath)
 
             else:
-                raise Exception('Plugin already exists at %s, use "-f" to '
-                                'overwrite the existing directory.' % (
-                                    targetPath, ))
+                raise Exception(
+                    'Plugin already exists at %s, use "-f" to overwrite the existing directory.' %
+                    targetPath)
         if opts.symlink:
             os.symlink(pluginPath, targetPath)
         else:
             shutil.copytree(pluginPath, targetPath)
 
-    runNpmInstall(dev=opts.development, npm=opts.npm)
+    if not opts.skip_web_client:
+        runNpmInstall(dev=opts.development, npm=opts.npm)
 
 
 def main():
@@ -174,6 +186,12 @@ def main():
 
     plugin.add_argument('-s', '--symlink', action='store_true',
                         help='Install by symlinking to the plugin directory.')
+
+    plugin.add_argument('--skip-web-client', action='store_true',
+                        help='Skip the step of running the web client build.')
+
+    plugin.add_argument('--skip-requirements', action='store_true',
+                        help='Skip the step of pip installing the requirements.txt file.')
 
     plugin.add_argument('--dev', action='store_true',
                         dest='development',

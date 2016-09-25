@@ -17,6 +17,7 @@
 #  limitations under the License.
 ###############################################################################
 
+import diskcache
 import errno
 import getpass
 import glob
@@ -25,11 +26,26 @@ import mimetypes
 import os
 import re
 import requests
+import shutil
 import six
+import tempfile
+
+__version__ = '1.3.1'
+__license__ = 'Apache 2.0'
 
 DEFAULT_PAGE_LIMIT = 50  # Number of results to fetch per request
 
 _safeNameRegex = re.compile(r'^[/\\]+')
+
+
+def _compareDicts(x, y):
+    """
+    Compare two dictionaries with metadata.
+
+    :param x: First metadata item.
+    :param y: Second metadata item.
+    """
+    return len(x) == len(y) == len(set(x.items()) & set(y.items()))
 
 
 def _safeMakedirs(path):
@@ -66,6 +82,9 @@ class HttpError(Exception):
         self.responseText = text
         self.url = url
         self.method = method
+
+    def __str__(self):
+        return super(HttpError, self).__str__() + '\nResponse text: ' + self.responseText
 
 
 class GirderClient(object):
@@ -104,7 +123,7 @@ class GirderClient(object):
     MAX_CHUNK_SIZE = 1024 * 1024 * 64
 
     def __init__(self, host=None, port=None, apiRoot=None, scheme=None,
-                 dryrun=False, blacklist=None, apiUrl=None):
+                 dryrun=False, blacklist=None, apiUrl=None, cacheSettings=None):
         """
         Construct a new GirderClient object, given a host name and port number,
         as well as a username and password which will be used in all requests
@@ -124,6 +143,8 @@ class GirderClient(object):
         :param scheme: A string containing the scheme for the Girder host,
             the default value is 'http'; if you pass 'https' you likely want
             to pass 443 for the port
+        :param cacheSettings: Settings to use with the diskcache library, or
+            None to disable caching.
         """
         if apiUrl is None:
             if apiRoot is None:
@@ -148,6 +169,13 @@ class GirderClient(object):
             self.blacklist = []
         self.folder_upload_callbacks = []
         self.item_upload_callbacks = []
+        self.incomingMetadata = {}
+        self.localMetadata = {}
+
+        if cacheSettings is None:
+            self.cache = None
+        else:
+            self.cache = diskcache.Cache(**cacheSettings)
 
     def authenticate(self, username=None, password=None, interactive=False,
                      apiKey=None):
@@ -359,6 +387,29 @@ class GirderClient(object):
 
             params['offset'] += n
 
+    def setResourceTimestamp(self, id, type, created=None, updated=None):
+        """
+        Set the created or updated timestamps for a resource.
+        """
+        url = 'resource/%s/timestamp' % id
+        params = {
+            'type': type,
+        }
+        if created:
+            params['created'] = str(created)
+        if updated:
+            params['updated'] = str(updated)
+        return self.put(url, parameters=params)
+
+    def getFile(self, fileId):
+        """
+        Retrieves a file by its ID.
+
+        :param fileId: A string containing the ID of the file to retrieve from
+            Girder.
+        """
+        return self.getResource('file', fileId)
+
     def listFile(self, itemId, limit=None, offset=None):
         """
         This is a generator that will yield files under the given itemId.
@@ -371,14 +422,15 @@ class GirderClient(object):
             'id': itemId,
         }, limit=limit, offset=offset)
 
-    def createItem(self, parentFolderId, name, description=''):
+    def createItem(self, parentFolderId, name, description='', reuseExisting=False):
         """
         Creates and returns an item.
         """
         params = {
             'folderId': parentFolderId,
             'name': name,
-            'description': description
+            'description': description,
+            'reuseExisting': reuseExisting
         }
         return self.createResource('item', params)
 
@@ -839,25 +891,60 @@ class GirderClient(object):
             name = name.replace(os.path.altsep, '_')
         return _safeNameRegex.sub('_', name)
 
-    def downloadFile(self, fileId, path):
+    def _copyFile(self, fp, path):
         """
-        Download a file to the given local path.
-
-        :param fileId: The ID of the Girder file to download.
-        :param path: The local path to write the file to, or
-            a file-like object.
+        Copy the `fp` file-like object to `path` which may be a filename string
+        or another file-like object to write to.
         """
-        req = requests.get('%sfile/%s/download' % (self.urlBase, fileId),
-                           headers={'Girder-Token': self.token})
         if isinstance(path, six.string_types):
             _safeMakedirs(os.path.dirname(path))
-
-            with open(path, 'wb') as fd:
-                for chunk in req.iter_content(chunk_size=65536):
-                    fd.write(chunk)
+            with open(path, 'wb') as dst:
+                shutil.copyfileobj(fp, dst)
         else:
+            # assume `path` is a file-like object
+            shutil.copyfileobj(fp, path)
+
+    def downloadFile(self, fileId, path, created=None):
+        """
+        Download a file to the given local path or file-like object.
+
+        :param fileId: The ID of the Girder file to download.
+        :param path: The path to write the file to, or a file-like object.
+        """
+        created = created or self.getFile(fileId)['created']
+        cacheKey = '\n'.join([self.urlBase, fileId, created])
+
+        # see if file is in local cache
+        if self.cache is not None:
+            fp = self.cache.get(cacheKey, read=True)
+            if fp:
+                with fp:
+                    self._copyFile(fp, path)
+                return
+
+        # download to a tempfile
+        req = requests.get(
+            '%sfile/%s/download' % (self.urlBase, fileId),
+            stream=True, headers={'Girder-Token': self.token})
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
             for chunk in req.iter_content(chunk_size=65536):
-                path.write(chunk)
+                tmp.write(chunk)
+
+        # save file in cache
+        if self.cache is not None:
+            with open(tmp.name, 'rb') as fp:
+                self.cache.set(cacheKey, fp, read=True)
+
+        if isinstance(path, six.string_types):
+            # we can just rename the tempfile
+            _safeMakedirs(os.path.dirname(path))
+            shutil.move(tmp.name, path)
+        else:
+            # write to file-like object
+            with open(tmp.name, 'rb') as fp:
+                shutil.copyfileobj(fp, path)
+            # delete the temp file
+            os.remove(tmp.name)
 
     def downloadItem(self, itemId, dest, name=None):
         """
@@ -888,7 +975,8 @@ class GirderClient(object):
                 if len(files) == 1 and files[0]['name'] == name:
                     self.downloadFile(
                         files[0]['_id'],
-                        os.path.join(dest, self.transformFilename(name)))
+                        os.path.join(dest, self.transformFilename(name)),
+                        created=files[0]['created'])
                     break
                 else:
                     dest = os.path.join(dest, self.transformFilename(name))
@@ -897,22 +985,25 @@ class GirderClient(object):
             for file in files:
                 self.downloadFile(
                     file['_id'],
-                    os.path.join(dest, self.transformFilename(file['name'])))
+                    os.path.join(dest, self.transformFilename(file['name'])),
+                    created=file['created'])
 
             first = False
             offset += len(files)
             if len(files) < DEFAULT_PAGE_LIMIT:
                 break
 
-    def downloadFolderRecursive(self, folderId, dest):
+    def downloadFolderRecursive(self, folderId, dest, sync=False):
         """
         Download a folder recursively from Girder into a local directory.
 
-        :param folderId: Id of the Girder folder to download.
+        :param folderId: Id of the Girder folder or resource path to download.
         :param dest: The local download destination.
+        :param sync: If True, check if item exists in local metadata
+            cache and skip download provided that metadata is identical.
         """
         offset = 0
-
+        folderId = self._checkResourcePath(folderId)
         while True:
             folders = self.get('folder', parameters={
                 'limit': DEFAULT_PAGE_LIMIT,
@@ -942,11 +1033,39 @@ class GirderClient(object):
             })
 
             for item in items:
+                _id = item['_id']
+                self.incomingMetadata[_id] = item
+                if sync and _id in self.localMetadata and \
+                        _compareDicts(item, self.localMetadata[_id]):
+                    continue
                 self.downloadItem(item['_id'], dest, name=item['name'])
 
             offset += len(items)
             if len(items) < DEFAULT_PAGE_LIMIT:
                 break
+
+    def saveLocalMetadata(self, dest):
+        """
+        Dumps item metadata collected during a folder download.
+
+        :param dest: The local download destination.
+        """
+
+        with open(os.path.join(dest, '.girder_metadata'), 'w') as fh:
+            fh.write(json.dumps(self.incomingMetadata))
+
+    def loadLocalMetadata(self, dest):
+        """
+        Reads item metadata from a local folder.
+
+        :param dest: The local download destination.
+        """
+
+        try:
+            with open(os.path.join(dest, '.girder_metadata'), 'r') as fh:
+                self.localMetadata = json.loads(fh.read())
+        except (IOError, OSError):
+            print('Local metadata does not exists. Falling back to download.')
 
     def inheritAccessControlRecursive(self, ancestorFolderId, access=None,
                                       public=None):
@@ -1198,7 +1317,7 @@ class GirderClient(object):
 
         :param file_pattern: a glob pattern for files that will be uploaded,
             recursively copying any file folder structures.
-        :param parent_id: id of the parent in Girder.
+        :param parent_id: id of the parent in Girder or resource path.
         :param parent_type: one of (collection,folder,user), default of folder.
         :param leaf_folders_as_items: bool whether leaf folders should have all
             files uploaded as single items.
@@ -1206,6 +1325,7 @@ class GirderClient(object):
             the same name in the same location, or create a new one instead.
         """
         empty = True
+        parent_id = self._checkResourcePath(parent_id)
         for current_file in glob.iglob(file_pattern):
             empty = False
             current_file = os.path.normpath(current_file)
@@ -1229,3 +1349,10 @@ class GirderClient(object):
                     leaf_folders_as_items, reuse_existing)
         if empty:
             print('No matching files: ' + file_pattern)
+
+    def _checkResourcePath(self, objId):
+        if isinstance(objId, six.string_types) and objId.startswith('/'):
+            obj = self.resourceLookup(objId, test=True)
+            if obj is not None:
+                return obj['_id']
+        return objId

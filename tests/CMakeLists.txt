@@ -1,6 +1,12 @@
 set(COVERAGE_MINIMUM_PASS 90 CACHE STRING "Minimum python coverage threshold percent")
 set(JS_COVERAGE_MINIMUM_PASS 75 CACHE STRING "Minimum JS coverage threshold percent")
 
+# Test if mongod is present for tests that require it.
+find_program(MONGOD_EXECUTABLE mongod)
+if("${MONGOD_EXECUTABLE}" STREQUAL "MONGOD_EXECUTABLE-NOTFOUND")
+  set(MONGOD_EXECUTABLE "local mongod required")
+endif()
+
 python_tests_init()
 javascript_tests_init()
 
@@ -10,11 +16,12 @@ if(RUN_CORE_TESTS)
 
   add_python_style_test(python_static_analysis_core "${PROJECT_SOURCE_DIR}/girder")
   add_python_style_test(python_static_analysis_core_tests "${PROJECT_SOURCE_DIR}/tests")
-  add_python_style_test(python_static_analysis_ansible_client_tests "${PROJECT_SOURCE_DIR}/clients/ansible")
+  add_python_style_test(python_static_analysis_ansible_client_tests
+    "${PROJECT_SOURCE_DIR}/devops/ansible/roles/girder/library")
 
   # These are performed approximately in the order listed.  upload is slower, so
   # start it first, so that if we have parallelism it doesn't hold things up much
-  add_python_test(upload RESOURCE_LOCKS replicaset)
+  add_python_test(upload RESOURCE_LOCKS replicaset REQUIRED_FILES "${MONGOD_EXECUTABLE}")
   add_python_test(api_describe)
   add_python_test(api_key)
   add_python_test(access)
@@ -23,6 +30,7 @@ if(RUN_CORE_TESTS)
   add_python_test(custom_root)
   add_python_test(events)
   add_python_test(file)
+  add_python_test(filter_logging)
   add_python_test(folder)
   add_python_test(group)
   add_python_test(hash_state)
@@ -37,19 +45,21 @@ if(RUN_CORE_TESTS)
   add_python_test(rest_util)
   add_python_test(routes)
   add_python_test(search)
+  add_python_test(setting)
   add_python_test(size)
   add_python_test(stream BIND_SERVER TIMEOUT 90)
   add_python_test(system)
   add_python_test(token)
   add_python_test(user)
   add_python_test(webroot)
+  add_python_test(path_utilities)
 
   add_python_test(py_client.cli BIND_SERVER RESOURCE_LOCKS py_client_test_dir)
   add_python_test(py_client.lib BIND_SERVER RESOURCE_LOCKS py_client_test_dir)
 
   add_web_client_test(data_filesystem "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dataSpec.js" ASSETSTORE filesystem)
   add_web_client_test(data_gridfs "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dataSpec.js" ASSETSTORE gridfs)
-  add_web_client_test(data_gridfsrs "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dataSpec.js" ASSETSTORE gridfsrs RESOURCE_LOCKS replicaset)
+  add_web_client_test(data_gridfsrs "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dataSpec.js" ASSETSTORE gridfsrs RESOURCE_LOCKS replicaset REQUIRED_FILES "${MONGOD_EXECUTABLE}")
   add_web_client_test(data_s3 "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dataSpec.js" ASSETSTORE s3 WEBSECURITY false)
   add_web_client_test(admin "${PROJECT_SOURCE_DIR}/clients/web/test/spec/adminSpec.js" ASSETSTORE s3 WEBSECURITY false
     PLUGIN_DIRS "${PROJECT_SOURCE_DIR}/plugins:${PROJECT_SOURCE_DIR}/tests/test_plugins")
@@ -65,7 +75,11 @@ if(RUN_CORE_TESTS)
   add_web_client_test(datetime_widget "${PROJECT_SOURCE_DIR}/clients/web/test/spec/dateTimeWidgetSpec.js")
   add_web_client_test(empty_layout "${PROJECT_SOURCE_DIR}/clients/web/test/spec/emptyLayoutSpec.js")
   add_web_client_test(swagger "${PROJECT_SOURCE_DIR}/clients/web/test/spec/swaggerSpec.js" BASEURL "/api/v1" NOCOVERAGE)
+  add_web_client_test(browser "${PROJECT_SOURCE_DIR}/clients/web/test/spec/browserSpec.js")
 
+  if (BUILD_JAVASCRIPT_TESTS)
+    set_property(TEST web_client_admin PROPERTY RUN_SERIAL ON)
+  endif()
   # Add tests for the local TestData module
   add_plugin_data_path("has_external_data" "${PROJECT_SOURCE_DIR}/tests/test_plugins/has_external_data")
   add_python_test(external_data_core
@@ -79,6 +93,7 @@ if(RUN_CORE_TESTS)
 
   add_subdirectory(clients)
   add_subdirectory(packaging)
+  include(DocumentationTests.cmake)
 endif()
 
 

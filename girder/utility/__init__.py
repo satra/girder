@@ -18,6 +18,7 @@
 ###############################################################################
 
 import datetime
+import dateutil.parser
 import errno
 import json
 import os
@@ -25,7 +26,7 @@ import pytz
 import re
 import string
 
-from girder.constants import TerminalColor
+import girder
 import girder.events
 
 try:
@@ -33,9 +34,28 @@ try:
     random = SystemRandom()
     random.random()  # potentially raises NotImplementedError
 except NotImplementedError:  # pragma: no cover
-    print(TerminalColor.warning(
-        'WARNING: using non-cryptographically secure PRNG.'))
+    girder.logprint.warning(
+        'WARNING: using non-cryptographically secure PRNG.')
     import random
+
+
+def parseTimestamp(x, naive=True):
+    """
+    Parse a datetime string using the python-dateutil package.
+
+    If no timezone information is included, assume UTC. If timezone information
+    is included, convert to UTC.
+
+    If naive is True (the default), drop the timezone information such that a
+    naive datetime is returned.
+    """
+    dt = dateutil.parser.parse(x)
+    if dt.tzinfo:
+        dt = dt.astimezone(pytz.utc).replace(tzinfo=None)
+    if naive:
+        return dt
+    else:
+        return pytz.utc.localize(dt)
 
 
 def genToken(length=64):

@@ -26,8 +26,8 @@ import sys
 import traceback
 
 from . import docs
-from girder import events, logger
-from girder.constants import SettingKey, TerminalColor, TokenScope, SortDir
+from girder import events, logger, logprint
+from girder.constants import SettingKey, TokenScope, SortDir
 from girder.models.model_base import AccessException, GirderException, \
     ValidationException
 from girder.utility.model_importer import ModelImporter
@@ -238,18 +238,30 @@ def requireAdmin(user, message=None):
     :type message: str or None
     :raises AccessException: If the user is not an administrator.
     """
-    if user is None or user.get('admin', False) is not True:
+    if user is None or not user['admin']:
         raise AccessException(message or 'Administrator access required.')
 
 
-def getBodyJson():
+def getBodyJson(allowConstants=False):
     """
     For requests that are expected to contain a JSON body, this returns the
     parsed value, or raises a :class:`girder.api.rest.RestException` for
     invalid JSON.
+
+    :param allowConstants: Whether the keywords Infinity, -Infinity, and NaN
+        should be allowed. These keywords are valid JavaScript and will parse
+        to the correct float values, but are not valid in strict JSON.
+    :type allowConstants: bool
     """
+    if allowConstants:
+        _parseConstants = None
+    else:
+        def _parseConstants(val):
+            raise RestException('Error: "%s" is not valid JSON.' % val)
+
+    text = cherrypy.request.body.read().decode('utf8')
     try:
-        return json.loads(cherrypy.request.body.read().decode('utf8'))
+        return json.loads(text, parse_constant=_parseConstants)
     except ValueError:
         raise RestException('Invalid JSON passed in request body.')
 
@@ -260,6 +272,7 @@ class loadmodel(ModelImporter):  # noqa: class name
     For access controlled models, it will check authorization for the current
     user. The underlying function is called with a modified set of keyword
     arguments that is transformed by the "map" parameter of this decorator.
+    Any additional kwargs will be passed to the underlying model's `load`.
 
     :param map: Map of incoming parameter name to corresponding model arg name.
         If None is passed, this will map the parameter named "id" to a kwarg
@@ -278,7 +291,7 @@ class loadmodel(ModelImporter):  # noqa: class name
     :type exc: bool
     """
     def __init__(self, map=None, model=None, plugin='_core', level=None,
-                 force=False, exc=True):
+                 force=False, exc=True, **kwargs):
         if map is None:
             self.map = {'id': model}
         else:
@@ -289,6 +302,7 @@ class loadmodel(ModelImporter):  # noqa: class name
         self.modelName = model
         self.plugin = plugin
         self.exc = exc
+        self.kwargs = kwargs
 
     def _getIdValue(self, kwargs, idParam):
         if idParam in kwargs:
@@ -307,12 +321,14 @@ class loadmodel(ModelImporter):  # noqa: class name
                 id = self._getIdValue(kwargs, raw)
 
                 if self.force:
-                    kwargs[converted] = model.load(id, force=True)
+                    kwargs[converted] = model.load(
+                        id, force=True, **self.kwargs)
                 elif self.level is not None:
                     kwargs[converted] = model.load(
-                        id=id, level=self.level, user=getCurrentUser())
+                        id=id, level=self.level, user=getCurrentUser(),
+                        **self.kwargs)
                 else:
-                    kwargs[converted] = model.load(id)
+                    kwargs[converted] = model.load(id, **self.kwargs)
 
                 if kwargs[converted] is None and self.exc:
                     raise RestException(
@@ -417,7 +433,7 @@ def _createResponse(val):
             break
         elif accept.value == 'text/html':  # pragma: no cover
             # Pretty-print and HTML-ify the response for the browser
-            cherrypy.response.headers['Content-Type'] = 'text/html'
+            setResponseHeader('Content-Type', 'text/html')
             resp = json.dumps(val, indent=4, sort_keys=True, allow_nan=False,
                               separators=(',', ': '), cls=JsonEncoder)
             resp = resp.replace(' ', '&nbsp;').replace('\n', '<br />')
@@ -426,7 +442,7 @@ def _createResponse(val):
 
     # Default behavior will just be normal JSON output. Keep this
     # outside of the loop body in case no Accept header is passed.
-    cherrypy.response.headers['Content-Type'] = 'application/json'
+    setResponseHeader('Content-Type', 'application/json')
     return json.dumps(val, sort_keys=True, allow_nan=False,
                       cls=JsonEncoder).encode('utf8')
 
@@ -570,15 +586,15 @@ def _setCommonCORSHeaders():
     allowed = ModelImporter.model('setting').get(SettingKey.CORS_ALLOW_ORIGIN)
 
     if allowed:
-        cherrypy.response.headers['Access-Control-Allow-Credentials'] = 'true'
+        setResponseHeader('Access-Control-Allow-Credentials', 'true')
 
         allowed_list = [o.strip() for o in allowed.split(',')]
         key = 'Access-Control-Allow-Origin'
 
         if len(allowed_list) == 1:
-            cherrypy.response.headers[key] = allowed_list[0]
+            setResponseHeader(key, allowed_list[0])
         elif origin in allowed_list:
-            cherrypy.response.headers[key] = origin
+            setResponseHeader(key, origin)
 
 
 class RestException(Exception):
@@ -617,10 +633,10 @@ class Resource(ModelImporter):
         """
         if not hasattr(self, '_routes'):
             Resource.__init__(self)
-            print(TerminalColor.warning(
+            logprint.warning(
                 'WARNING: Resource subclass "%s" did not call '
                 '"Resource__init__()" from its constructor.' %
-                self.__class__.__name__))
+                self.__class__.__name__)
 
     def route(self, method, route, handler, nodoc=False, resource=None):
         """
@@ -665,26 +681,26 @@ class Resource(ModelImporter):
                     info=handler.description.asDict(), handler=handler)
         elif not nodoc:
             routePath = '/'.join([resource] + list(route))
-            print(TerminalColor.warning(
+            logprint.warning(
                 'WARNING: No description docs present for route %s %s' % (
-                    method, routePath)))
+                    method, routePath))
 
         # Warn if there is no access decorator on the handler function
         if not hasattr(handler, 'accessLevel'):
             routePath = '/'.join([resource] + list(route))
-            print(TerminalColor.warning(
+            logprint.warning(
                 'WARNING: No access level specified for route %s %s' % (
-                    method, routePath)))
+                    method, routePath))
 
         if method.lower() not in ('head', 'get') \
             and hasattr(handler, 'cookieAuth') \
             and not (isinstance(handler.cookieAuth, tuple) and
                      handler.cookieAuth[1]):
             routePath = '/'.join([resource] + list(route))
-            print(TerminalColor.warning(
-                  'WARNING: Cannot allow cookie authentication for '
-                  'route %s %s without specifying "force=True"' % (
-                      method, routePath)))
+            logprint.warning(
+                'WARNING: Cannot allow cookie authentication for '
+                'route %s %s without specifying "force=True"' % (
+                    method, routePath))
 
     def removeRoute(self, method, route, handler=None, resource=None):
         """
@@ -1007,8 +1023,8 @@ class Resource(ModelImporter):
         allowMethods = self.model('setting').get(SettingKey.CORS_ALLOW_METHODS)\
             or 'GET, POST, PUT, HEAD, DELETE'
 
-        cherrypy.response.headers['Access-Control-Allow-Methods'] = allowMethods
-        cherrypy.response.headers['Access-Control-Allow-Headers'] = allowHeaders
+        setResponseHeader('Access-Control-Allow-Methods', allowMethods)
+        setResponseHeader('Access-Control-Allow-Headers', allowHeaders)
 
     @endpoint
     def DELETE(self, path, params):

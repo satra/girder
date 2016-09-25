@@ -46,6 +46,7 @@ module.exports = function (grunt) {
             options: {
                 client: true,
                 compileDebug: false,
+                doctype: 'html',
                 namespace: 'girder.templates',
                 processName: function (filename) {
                     return path.basename(filename, '.jade');
@@ -76,12 +77,6 @@ module.exports = function (grunt) {
                     src: ['img/**'],
                     dest: 'clients/web/static/built/jsoneditor'
                 }]
-            },
-            fontello_config: {
-                files: [{
-                    src: 'clients/web/fontello.config.json',
-                    dest: 'clients/web/static/built/fontello.config.json'
-                }]
             }
         },
 
@@ -95,18 +90,6 @@ module.exports = function (grunt) {
                     'clients/web/static/built/swagger/docs.css': [
                         'clients/web/src/stylesheets/apidocs/*.styl'
                     ]
-                }
-            }
-        },
-
-        fontello: {
-            ext_font: {
-                options: {
-                    config: 'clients/web/static/built/fontello.config.json',
-                    fonts: 'clients/web/static/built/fontello/font',
-                    styles: 'clients/web/static/built/fontello/css',
-                    // Create output directories
-                    force: true
                 }
             }
         },
@@ -179,7 +162,8 @@ module.exports = function (grunt) {
 
         symlink: {
             options: {
-                overwrite: true
+                overwrite: true,
+                force: true
             },
             legacy_names: {
                 // Provide static files under old names, for compatibility
@@ -240,9 +224,7 @@ module.exports = function (grunt) {
             'uglify:ext_js': {},
             'copy:swagger': {},
             'copy:jsoneditor': {},
-            'copy:fontello_config': {},
-            'concat:ext_css': {},
-            'fontello:ext_font': {}
+            'concat:ext_css': {}
         },
 
         default: {

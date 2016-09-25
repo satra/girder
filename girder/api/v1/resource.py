@@ -17,16 +17,17 @@
 #  limitations under the License.
 ###############################################################################
 
-import cherrypy
 import json
 
 from ..describe import Description, describeRoute
-from ..rest import Resource as BaseResource, RestException
+from ..rest import Resource as BaseResource, RestException, setResponseHeader
 from girder.constants import AccessType, TokenScope
 from girder.api import access
 from girder.models.model_base import AccessControlledModel
 from girder.utility import acl_mixin
+from girder.utility import parseTimestamp
 from girder.utility import ziputil
+from girder.utility import path as path_util
 from girder.utility.progress import ProgressContext
 
 # Plugins can modify this set to allow other types to be searched
@@ -43,6 +44,8 @@ class Resource(BaseResource):
         self.route('GET', ('search',), self.search)
         self.route('GET', ('lookup',), self.lookup)
         self.route('GET', (':id',), self.getResource)
+        self.route('GET', (':id', 'path'), self.path)
+        self.route('PUT', (':id', 'timestamp'), self.setTimestamp)
         self.route('GET', ('download',), self.download)
         self.route('POST', ('download',), self.download)
         self.route('PUT', ('move',), self.moveResources)
@@ -193,7 +196,8 @@ class Resource(BaseResource):
             will return None instead of throwing exception when
             path doesn't exist
         """
-        pathArray = [token for token in path.split('/') if token]
+        path = path.lstrip('/')
+        pathArray = path_util.split(path)
         model = pathArray[0]
 
         parent = None
@@ -257,6 +261,55 @@ class Resource(BaseResource):
         test = self.boolParam('test', params, default=False)
         return self._lookUpPath(params['path'], self.getCurrentUser(), test)
 
+    def _getResourceName(self, type, doc):
+        if type == 'user':
+            return doc['login']
+        elif type in ('file', 'item', 'folder', 'user', 'collection'):
+            return doc['name']
+        else:
+            raise RestException(
+                'Invalid resource type.'
+            )
+
+    def _getResourceParent(self, type, doc):
+        if type == 'file':
+            return doc['itemId'], 'item'
+        elif type == 'item':
+            return doc['folderId'], 'folder'
+        elif type == 'folder':
+            return doc['parentId'], doc['parentCollection']
+        else:
+            raise RestException(
+                'Invalid resource type.'
+            )
+
+    @access.public(scope=TokenScope.DATA_READ)
+    @describeRoute(
+        Description('Get path of a resource.')
+        .param('id', 'The ID of the resource.', paramType='path')
+        .param('type', 'The type of the resource (item, file, etc.).')
+        .errorResponse('ID was invalid.')
+        .errorResponse('Invalid resource type.')
+        .errorResponse('Read access was denied for the resource.', 403)
+    )
+    def path(self, id, params):
+        path = []
+        type = params['type']
+        while True:
+            doc = self._getResource(id, type)
+            if doc is None:
+                raise RestException('Invalid resource id.')
+            name = self._getResourceName(type, doc)
+            path.insert(0, name)
+
+            if type in ('file', 'item', 'folder'):
+                id, type = self._getResourceParent(type, doc)
+            else:
+                break
+
+        path.insert(0, type)
+        return '/' + path_util.join(path)
+
     @access.cookie(force=True)
     @access.public(scope=TokenScope.DATA_READ)
     @describeRoute(
@@ -294,9 +347,10 @@ class Resource(BaseResource):
                     raise RestException('Resource %s %s not found.' %
                                         (kind, id))
         metadata = self.boolParam('includeMetadata', params, default=False)
-        cherrypy.response.headers['Content-Type'] = 'application/zip'
-        cherrypy.response.headers['Content-Disposition'] = \
-            'attachment; filename="Resources.zip"'
+        setResponseHeader('Content-Type', 'application/zip')
+        setResponseHeader(
+            'Content-Disposition',
+            'attachment; filename="Resources.zip"')
 
         def stream():
             zip = ziputil.ZipGenerator()
@@ -364,6 +418,14 @@ class Resource(BaseResource):
                             ctx.update(current=current,
                                        message='Deleted ' + kind)
 
+    def _getResource(self, id, type):
+        model = self._getResourceModel(type)
+        if (isinstance(model, (acl_mixin.AccessControlMixin,
+                               AccessControlledModel))):
+            user = self.getCurrentUser()
+            return model.load(id=id, user=user, level=AccessType.READ)
+        return model.load(id=id)
+
     @access.admin
     @describeRoute(
         Description('Get any resource by ID.')
@@ -373,12 +435,33 @@ class Resource(BaseResource):
         .errorResponse('Read access was denied for the resource.', 403)
     )
     def getResource(self, id, params):
+        return self._getResource(id, params['type'])
+
+    @access.admin
+    @describeRoute(
+        Description('Set the created or updated timestamp for a resource.')
+        .param('id', 'The ID of the resource.', paramType='path')
+        .param('type', 'The type of the resource (item, file, etc.).')
+        .param('created', 'The new created timestamp.', required=False)
+        .param('updated', 'The new updated timestamp.', required=False)
+        .errorResponse('ID was invalid.')
+        .errorResponse('Access was denied for the resource.', 403)
+    )
+    def setTimestamp(self, id, params):
+        user = self.getCurrentUser()
         model = self._getResourceModel(params['type'])
-        if (isinstance(model, (acl_mixin.AccessControlMixin,
-                               AccessControlledModel))):
-            user = self.getCurrentUser()
-            return model.load(id=id, user=user, level=AccessType.READ)
-        return model.load(id=id)
+        doc = model.load(id=id, user=user, level=AccessType.WRITE)
+        if not doc:
+            raise RestException('Resource not found.')
+        if 'created' in params:
+            if 'created' not in doc:
+                raise RestException('Resource has no "created" field.')
+            doc['created'] = parseTimestamp(params['created'])
+        if 'updated' in params:
+            if 'updated' not in doc:
+                raise RestException('Resource has no "updated" field.')
+            doc['updated'] = parseTimestamp(params['updated'])
+        return model.save(doc)
 
     def _prepareMoveOrCopy(self, params):
         user = self.getCurrentUser()

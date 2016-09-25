@@ -365,6 +365,15 @@ class ItemTestCase(base.TestCase):
         self.assertEqual(item['meta']['foo'], metadata['foo'])
         self.assertEqual(item['meta']['test'], metadata['test'])
 
+        # Test invalid JSON constants
+        body = '{"key": {"foo": Infinity}}'
+        resp = self.request(path='/item/%s/metadata' % item['_id'],
+                            method='PUT', user=self.users[0],
+                            body=body, type='application/json')
+        self.assertStatus(resp, 400)
+        self.assertEqual(
+            resp.json['message'], 'Error: "Infinity" is not valid JSON.')
+
         # Edit and remove metadata
         metadata['test'] = None
         metadata['foo'] = 'baz'
@@ -445,7 +454,7 @@ class ItemTestCase(base.TestCase):
 
         # set a private property
         item['private'] = 'very secret metadata'
-        self.model('item').save(item)
+        item = self.model('item').save(item)
 
         # get the item from the rest api
         resp = self.request(path='/item/%s' % str(item['_id']), method='GET',
@@ -503,7 +512,7 @@ class ItemTestCase(base.TestCase):
         # Force the item to be saved without lowerName and baseParentType fields
         del item['lowerName']
         del item['baseParentType']
-        self.model('item').save(item, validate=False)
+        item = self.model('item').save(item, validate=False)
 
         item = self.model('item').find({'_id': item['_id']})[0]
         self.assertNotHasKeys(item, ('lowerName', 'baseParentType'))
@@ -528,7 +537,7 @@ class ItemTestCase(base.TestCase):
         # corrected.
         item['description'] = 1
         del item['lowerName']
-        self.model('item').save(item, validate=False)
+        item = self.model('item').save(item, validate=False)
         item = self.model('item').find({'_id': item['_id']})[0]
         self.assertNotHasKeys(item, ('lowerName', ))
         self.model('item').load(item['_id'], force=True)
@@ -663,3 +672,19 @@ class ItemTestCase(base.TestCase):
         resp = self.request(path='/item/%s/download' % item['_id'],
                             cookie='girderToken=invalid_token')
         self.assertStatus(resp, 401)
+
+    def testReuseExisting(self):
+        item1 = self.model('item').createItem(
+            'to be reused', creator=self.users[0], folder=self.publicFolder)
+
+        item2 = self.model('item').createItem(
+            'to be reused', creator=self.users[0], folder=self.publicFolder)
+
+        item3 = self.model('item').createItem(
+            'to be reused', creator=self.users[0], folder=self.publicFolder,
+            reuseExisting=True)
+
+        self.assertNotEqual(item1['_id'], item2['_id'])
+        self.assertEqual(item1['_id'], item3['_id'])
+        self.assertEqual(item2['name'], 'to be reused (1)')
+        self.assertEqual(item3['name'], 'to be reused')

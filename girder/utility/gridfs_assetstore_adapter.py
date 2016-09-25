@@ -18,17 +18,16 @@
 ###############################################################################
 
 import bson
-import cherrypy
+from hashlib import sha512
 import pymongo
 import six
+from six import BytesIO
 import uuid
 
-from six import BytesIO
 from girder import logger
+from girder.api.rest import setResponseHeader
 from girder.models import getDbConnection
 from girder.models.model_base import ValidationException
-
-from hashlib import sha512
 from . import hash_state
 from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
 
@@ -36,6 +35,16 @@ from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
 # 2MB chunks. Clients must not send any chunks that are smaller than this
 # unless they are sending the final chunk.
 CHUNK_SIZE = 2097152
+
+
+def _ensureChunkIndices(collection):
+    """
+    Ensure that we have appropriate indices on the chunk collection.
+    """
+    collection.create_index([
+        ('uuid', pymongo.ASCENDING),
+        ('n', pymongo.ASCENDING)
+    ], unique=True)
 
 
 class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
@@ -61,10 +70,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
                 doc.get('mongohost', None), doc.get('replicaset', None),
                 autoRetry=False,
                 serverSelectionTimeoutMS=10000)[doc['db']].chunk
-            chunkColl.create_index([
-                ('uuid', pymongo.ASCENDING),
-                ('n', pymongo.ASCENDING)
-            ], unique=True)
+            _ensureChunkIndices(chunkColl)
         except pymongo.errors.ServerSelectionTimeoutError as e:
             raise ValidationException(
                 'Could not connect to the database: %s' % str(e))
@@ -85,6 +91,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
                 self.assetstore.get('mongohost', None),
                 self.assetstore.get('replicaset', None)
             )[self.assetstore['db']].chunk
+            _ensureChunkIndices(self.chunkColl)
         except pymongo.errors.ConnectionFailure:
             logger.error('Failed to connect to GridFS assetstore %s',
                          self.assetstore['db'])
@@ -227,7 +234,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
             endByte = file['size']
 
         if headers:
-            cherrypy.response.headers['Accept-Ranges'] = 'bytes'
+            setResponseHeader('Accept-Ranges', 'bytes')
             self.setContentHeaders(file, offset, endByte, contentDisposition)
 
         # If the file is empty, we stop here

@@ -1,6 +1,0 @@
----
-- src: https://github.com/girder/ansible-role-girder
-  name: girder
-
-- src: dstil.upstart
-  name: upstart

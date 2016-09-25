@@ -145,9 +145,9 @@ class Folder(AccessControlledModel):
             baseParent = pathFromRoot[0]
             doc['baseParentId'] = baseParent['object']['_id']
             doc['baseParentType'] = baseParent['type']
-            self.save(doc, triggerEvents=False)
+            doc = self.save(doc, triggerEvents=False)
         if doc is not None and 'lowerName' not in doc:
-            self.save(doc, triggerEvents=False)
+            doc = self.save(doc, triggerEvents=False)
 
         return doc
 
@@ -761,7 +761,7 @@ class Folder(AccessControlledModel):
                 newFolder[key] = copy.deepcopy(srcFolder[key])
                 updated = True
         if updated:
-            self.save(newFolder, triggerEvents=False)
+            newFolder = self.save(newFolder, triggerEvents=False)
         # Give listeners a chance to change things
         events.trigger('model.folder.copy.prepare', (srcFolder, newFolder))
         # copy items
@@ -838,32 +838,33 @@ class Folder(AccessControlledModel):
 
         :param folder: The folder to check.
         :type folder: dict
-        :param user: The user for permissions.
-        :type user: dict or None
+        :param user: (deprecated) Not used.
         """
         return not self.model(folder.get('parentCollection')).load(
-            folder.get('parentId'), user=user)
+            folder.get('parentId'), force=True)
 
-    def updateSize(self, doc, user):
+    def updateSize(self, doc, user=None):
         """
         Recursively recomputes the size of this folder and its underlying
         folders and fixes the sizes as needed.
 
         :param doc: The folder.
         :type doc: dict
-        :param user: The admin user for permissions.
-        :type user: dict
+        :param user: (deprecated) Not used.
         """
         size = 0
         fixes = 0
         # recursively fix child folders but don't include their size
-        children = self.childFolders(doc, 'folder', user)
+        children = self.model('folder').find({
+            'parentId': doc['_id'],
+            'parentCollection': 'folder'
+        })
         for child in children:
-            _, f = self.model('folder').updateSize(child, user)
+            _, f = self.model('folder').updateSize(child)
             fixes += f
         # get correct size from child items
         for item in self.childItems(doc):
-            s, f = self.model('item').updateSize(item, user)
+            s, f = self.model('item').updateSize(item)
             size += s
             fixes += f
         # fix value if incorrect

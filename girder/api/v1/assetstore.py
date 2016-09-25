@@ -38,6 +38,7 @@ class Assetstore(Resource):
         self.route('POST', (':id', 'import'), self.importData)
         self.route('PUT', (':id',), self.updateAssetstore)
         self.route('DELETE', (':id',), self.deleteAssetstore)
+        self.route('GET', (':id', 'files'), self.getAssetstoreFiles)
 
     @access.admin
     @loadmodel(model='assetstore')
@@ -81,6 +82,8 @@ class Assetstore(Resource):
         .param('type', 'Type of the assetstore.')
         .param('root', 'Root path on disk (for filesystem type).',
                required=False)
+        .param('perms', 'File creation permissions (for filesystem type).',
+               required=False)
         .param('db', 'Database name (for GridFS type)', required=False)
         .param('mongohost', 'Mongo host URI (for GridFS type)', required=False)
         .param('replicaset', 'Replica set name (for GridFS type)',
@@ -111,8 +114,9 @@ class Assetstore(Resource):
 
         if assetstoreType == AssetstoreType.FILESYSTEM:
             self.requireParams('root', params)
+            perms = params.get('perms', None)
             return self.model('assetstore').createFilesystemAssetstore(
-                name=params['name'], root=params['root'])
+                name=params['name'], root=params['root'], perms=perms)
         elif assetstoreType == AssetstoreType.GRIDFS:
             self.requireParams('db', params)
             return self.model('assetstore').createGridFsAssetstore(
@@ -147,6 +151,11 @@ class Assetstore(Resource):
                enum=('folder', 'collection', 'user'))
         .param('progress', 'Whether to record progress on the import.',
                dataType='boolean', default=False, required=False)
+        .param('fileIncludeRegex', 'If set, only filenames matching this regular '
+               'expression will be imported.', required=False)
+        .param('fileExcludeRegex', 'If set, only filenames that do not match this regular '
+               'expression will be imported. If a file matches both the include and exclude regex, '
+               'it will be excluded.', required=False)
         .errorResponse()
         .errorResponse('You are not an administrator.', 403)
     )
@@ -155,19 +164,15 @@ class Assetstore(Resource):
 
         parentType = params.pop('destinationType')
         if parentType not in ('folder', 'collection', 'user'):
-            raise RestException('The destinationType must be user, folder, or '
-                                'collection.')
+            raise RestException('The destinationType must be user, folder, or collection.')
 
         user = self.getCurrentUser()
         parent = self.model(parentType).load(
-            params.pop('destinationId'), user=user, level=AccessType.ADMIN,
-            exc=True)
+            params.pop('destinationId'), user=user, level=AccessType.ADMIN, exc=True)
 
         progress = self.boolParam('progress', params, default=False)
-        leafFoldersAsItems = self.boolParam('leafFoldersAsItems', params,
-                                            default=False)
-        with ProgressContext(
-                progress, user=user, title='Importing data') as ctx:
+        leafFoldersAsItems = self.boolParam('leafFoldersAsItems', params, default=False)
+        with ProgressContext(progress, user=user, title='Importing data') as ctx:
             return self.model('assetstore').importData(
                 assetstore, parent=parent, parentType=parentType, params=params,
                 progress=ctx, user=user, leafFoldersAsItems=leafFoldersAsItems)
@@ -180,6 +185,8 @@ class Assetstore(Resource):
         .param('id', 'The ID of the assetstore.', paramType='path')
         .param('name', 'Unique name for the assetstore')
         .param('root', 'Root path on disk (for Filesystem type)',
+               required=False)
+        .param('perms', 'File creation permissions (for Filesystem type)',
                required=False)
         .param('db', 'Database name (for GridFS type)', required=False)
         .param('mongohost', 'Mongo host URI (for GridFS type)', required=False)
@@ -214,6 +221,8 @@ class Assetstore(Resource):
         if assetstore['type'] == AssetstoreType.FILESYSTEM:
             self.requireParams('root', params)
             assetstore['root'] = params['root']
+            if 'perms' in params:
+                assetstore['perms'] = params['perms']
         elif assetstore['type'] == AssetstoreType.GRIDFS:
             self.requireParams('db', params)
             assetstore['db'] = params['db']
@@ -252,3 +261,18 @@ class Assetstore(Resource):
     def deleteAssetstore(self, assetstore, params):
         self.model('assetstore').remove(assetstore)
         return {'message': 'Deleted assetstore %s.' % assetstore['name']}
+
+    @access.admin
+    @loadmodel(model='assetstore')
+    @describeRoute(
+        Description('Get a list of files controlled by an assetstore.')
+        .param('id', 'The assetstore ID.', paramType='path')
+        .pagingParams(defaultSort='_id')
+        .errorResponse()
+        .errorResponse('You are not an administrator.', 403)
+    )
+    def getAssetstoreFiles(self, assetstore, params):
+        limit, offset, sort = self.getPagingParameters(params, '_id')
+        return list(self.model('file').find(
+            query={'assetstoreId': assetstore['_id']},
+            offset=offset, limit=limit, sort=sort))

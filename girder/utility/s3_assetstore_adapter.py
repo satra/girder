@@ -26,9 +26,9 @@ import requests
 import six
 import uuid
 
-from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
-from girder.models.model_base import ValidationException
 from girder import logger, events
+from girder.models.model_base import ValidationException
+from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
 
 BUF_LEN = 65536  # Buffer size for download stream
 boto.config.add_section('s3')
@@ -88,6 +88,9 @@ def _generate_url_sigv4(self, expires_in, method, bucket='', key='',
 
     if version_id is not None:
         params['VersionId'] = version_id
+
+    if response_headers is not None:
+        params.update(response_headers)
 
     http_request = self.build_base_http_request(
         method, path, auth_path, headers=headers, host=host, params=params)
@@ -187,6 +190,12 @@ class S3AssetstoreAdapter(AbstractAssetstoreAdapter):
         """
         if upload['size'] <= 0:
             return upload
+
+        # collapse consecutive spaces in the filename into a single space
+        # this is due to a bug in S3 that does not properly handle filenames
+        # with multiple spaces in a row, resulting in a SignatureDoesNotMatch
+        # error
+        upload['name'] = re.sub('\s+', ' ', upload['name'])
 
         uid = uuid.uuid4().hex
         key = '/'.join(filter(None, (self.assetstore.get('prefix', ''),
@@ -312,7 +321,7 @@ class S3AssetstoreAdapter(AbstractAssetstoreAdapter):
 
             key = mp.upload_part_from_file(
                 chunk, upload['s3']['partNumber'],
-                headers=self._getRequestHeaders(upload))
+                headers={'Content-Type': upload.get('mimeType', '')})
             upload['received'] += key.size
         else:
             key = bucket.new_key(upload['s3']['key'])
@@ -419,8 +428,7 @@ class S3AssetstoreAdapter(AbstractAssetstoreAdapter):
                     yield ''
             return stream
 
-    def importData(self, parent, parentType, params, progress, user,
-                   bucket=None, **kwargs):
+    def importData(self, parent, parentType, params, progress, user, bucket=None, **kwargs):
         importPath = params.get('importPath', '').strip().lstrip('/')
 
         if importPath and not importPath.endswith('/'):
@@ -448,17 +456,17 @@ class S3AssetstoreAdapter(AbstractAssetstoreAdapter):
 
                 if parentType != 'folder':
                     raise ValidationException(
-                        'Keys cannot be imported directly underneath a %s.' %
-                        parentType)
+                        'Keys cannot be imported directly underneath a %s.' % parentType)
 
-                item = self.model('item').createItem(
-                    name=name, creator=user, folder=parent, reuseExisting=True)
-                file = self.model('file').createFile(
-                    name=name, creator=user, item=item, reuseExisting=True,
-                    assetstore=self.assetstore, mimeType=None, size=obj.size)
-                file['s3Key'] = obj.name
-                file['imported'] = True
-                self.model('file').save(file)
+                if self.shouldImportFile(obj.name, params):
+                    item = self.model('item').createItem(
+                        name=name, creator=user, folder=parent, reuseExisting=True)
+                    file = self.model('file').createFile(
+                        name=name, creator=user, item=item, reuseExisting=True,
+                        assetstore=self.assetstore, mimeType=None, size=obj.size)
+                    file['s3Key'] = obj.name
+                    file['imported'] = True
+                    self.model('file').save(file)
 
     def deleteFile(self, file):
         """

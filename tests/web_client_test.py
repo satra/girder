@@ -182,7 +182,10 @@ class WebClientTestCase(base.TestCase):
                     hasJasmine = True
                 if 'Testing Finished' in line:
                     jasmineFinished = True
-                sys.stdout.write(line)
+                try:
+                    sys.stdout.write(line)
+                except UnicodeEncodeError:
+                    sys.stdout.write(repr(line))
                 sys.stdout.flush()
             returncode = task.wait()
             if not retry and hasJasmine and jasmineFinished:

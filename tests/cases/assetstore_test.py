@@ -30,6 +30,7 @@ import time
 import zipfile
 
 from .. import base, mock_s3
+from girder import events
 from girder.constants import AssetstoreType, ROOT_DIR
 from girder.utility import assetstore_utilities
 from girder.utility.progress import ProgressContext
@@ -74,13 +75,13 @@ class AssetstoreTestCase(base.TestCase):
         self.assertTrue(oldAssetstore['current'])
         self.assertEqual(oldAssetstore['name'], 'Test')
         self.assertEqual(oldAssetstore['type'], AssetstoreType.FILESYSTEM)
+        self.assertEqual(oldAssetstore['perms'], 0o600)
 
         params = {
             'name': 'Test',
             'type': -1
         }
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatus(resp, 400)
         self.assertEqual(resp.json, {
             'type': 'rest',
@@ -91,31 +92,44 @@ class AssetstoreTestCase(base.TestCase):
             'name': 'Test',
             'type': AssetstoreType.FILESYSTEM
         }
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertMissingParameter(resp, 'root')
 
         params['root'] = os.path.join(oldAssetstore['root'], 'other')
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatus(resp, 400)
         self.assertEqual(resp.json['field'], 'name')
 
         params['name'] = 'New Name'
         # Actually creates the new assetstore
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         assetstore = resp.json
         self.assertEqual(assetstore['name'], 'New Name')
         self.assertFalse(assetstore['current'])
 
-        # Set the new assetstore as current
+        # Test validation of file permissions
         params = {
             'name': assetstore['name'],
             'root': assetstore['root'],
-            'current': True
+            'current': True,
+            'perms': '384'
         }
+        resp = self.request(path='/assetstore/%s' % assetstore['_id'],
+                            method='PUT', user=self.admin, params=params)
+        self.assertStatus(resp, 400)
+        self.assertEqual(
+            resp.json['message'], 'File permissions must be an octal integer.')
+
+        params['perms'] = '400'
+        resp = self.request(path='/assetstore/%s' % assetstore['_id'],
+                            method='PUT', user=self.admin, params=params)
+        self.assertStatus(resp, 400)
+        self.assertEqual(
+            resp.json['message'], 'File permissions must allow "rw" for user.')
+
+        # Set the new assetstore as current
+        params['perms'] = '755'
         resp = self.request(path='/assetstore/%s' % assetstore['_id'],
                             method='PUT', user=self.admin, params=params)
         self.assertStatusOk(resp)
@@ -132,7 +146,7 @@ class AssetstoreTestCase(base.TestCase):
         # list it
         oldroot = assetstore['root']
         assetstore['root'] = '///invalidpath'
-        self.model('assetstore').save(assetstore, validate=False)
+        assetstore = self.model('assetstore').save(assetstore, validate=False)
         assetstoresAfter = list(self.model('assetstore').list())
         self.assertEqual(len(assetstoresBefore), len(assetstoresAfter))
         self.assertIsNone([
@@ -160,8 +174,7 @@ class AssetstoreTestCase(base.TestCase):
 
         resp = self.request(path, method='POST', params=params, user=self.admin)
         self.assertStatus(resp, 400)
-        self.assertEqual(resp.json['message'],
-                         'Not found: /nonexistent/dir.')
+        self.assertEqual(resp.json['message'], 'Not found: /nonexistent/dir.')
 
         # Test importing a single file
         params['importPath'] = os.path.join(
@@ -176,12 +189,28 @@ class AssetstoreTestCase(base.TestCase):
         file = self.model('file').load(resp.json['_id'], force=True, exc=True)
         self.assertTrue(os.path.isfile(file['path']))
 
-        # Test importing a directory
-        params['importPath'] = os.path.join(
-            ROOT_DIR, 'tests', 'cases', 'py_client')
-        resp = self.request(path, method='POST', params=params, user=self.admin)
+        self.model('file').remove(file)
+
+        # Test importing directory with include & exclude regexes; file should be excluded
+        params['importPath'] = os.path.join(ROOT_DIR, 'tests', 'cases', 'py_client')
+        resp = self.request(
+            path, method='POST', user=self.admin, params=dict(
+                params, fileIncludeRegex='world.*', fileExcludeRegex='world.*'))
         self.assertStatusOk(resp)
 
+        resp = self.request('/resource/lookup', user=self.admin, params={
+            'path': '/user/admin/Public/world.txt/world.txt',
+            'test': True
+        })
+        self.assertStatusOk(resp)
+        self.assertIsNone(resp.json)
+
+        # Do the import with the include regex on
+        resp = self.request(
+            path, method='POST', params=dict(params, fileIncludeRegex='hello.*'), user=self.admin)
+        self.assertStatusOk(resp)
+
+        # hello.txt should have been imported
         resp = self.request('/resource/lookup', user=self.admin, params={
             'path': '/user/admin/Public/testdata/hello.txt/hello.txt'
         })
@@ -191,15 +220,31 @@ class AssetstoreTestCase(base.TestCase):
 
         self.assertTrue(os.path.isfile(file['path']))
 
+        # world.txt should not
+        resp = self.request('/resource/lookup', user=self.admin, params={
+            'path': '/user/admin/Public/world.txt/world.txt',
+            'test': True
+        })
+        self.assertStatusOk(resp)
+        self.assertIsNone(resp.json)
+
+        # Run import without any regexes specified, all files should be imported
+        resp = self.request(path, method='POST', params=params, user=self.admin)
+        self.assertStatusOk(resp)
+
+        resp = self.request('/resource/lookup', user=self.admin, params={
+            'path': '/user/admin/Public/testdata/world.txt/world.txt'
+        })
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['_modelType'], 'file')
+
         # Make sure downloading the file works
-        resp = self.request('/file/%s/download' % str(file['_id']),
-                            isJson=False)
+        resp = self.request('/file/%s/download' % str(file['_id']), isJson=False)
         self.assertStatusOk(resp)
         self.assertEqual(self.getBody(resp), 'hello\n')
 
         # Deleting the file should not actually remove the file on disk
-        resp = self.request('/file/' + str(file['_id']), method='DELETE',
-                            user=self.admin)
+        resp = self.request('/file/' + str(file['_id']), method='DELETE', user=self.admin)
         self.assertStatusOk(resp)
 
         self.assertIsNone(self.model('file').load(file['_id'], force=True))
@@ -212,8 +257,7 @@ class AssetstoreTestCase(base.TestCase):
             }))
 
         params = {
-            'importPath': os.path.join(ROOT_DIR, 'tests', 'cases',
-                                       'py_client', 'testdata'),
+            'importPath': os.path.join(ROOT_DIR, 'tests', 'cases', 'py_client', 'testdata'),
             'destinationType': 'folder',
             'destinationId': folder['_id'],
             'leafFoldersAsItems': 'true'
@@ -236,14 +280,12 @@ class AssetstoreTestCase(base.TestCase):
         self.assertTrue(os.path.isfile(_file['path']))
 
         # Make sure downloading the file works
-        resp = self.request('/file/%s/download' % str(_file['_id']),
-                            isJson=False)
+        resp = self.request('/file/%s/download' % str(_file['_id']), isJson=False)
         self.assertStatusOk(resp)
         self.assertEqual(self.getBody(resp), 'hello\n')
 
         # Deleting the file should not actually remove the file on disk
-        resp = self.request('/file/' + str(_file['_id']), method='DELETE',
-                            user=self.admin)
+        resp = self.request('/file/' + str(_file['_id']), method='DELETE', user=self.admin)
         self.assertStatusOk(resp)
 
         self.assertIsNone(self.model('file').load(_file['_id'], force=True))
@@ -266,18 +308,16 @@ class AssetstoreTestCase(base.TestCase):
         self.model('file').save(real)
 
         fake = self.model('file').createFile(
-            name='fake', creator=self.admin, item=item, size=1,
-            assetstore=self.assetstore)
+            name='fake', creator=self.admin, item=item, size=1, assetstore=self.assetstore)
         fake['path'] = 'nonexistent/path/to/file'
         fake['sha512'] = '...'
-        self.model('file').save(fake)
+        fake = self.model('file').save(fake)
 
         fakeImport = self.model('file').createFile(
-            name='fakeImport', creator=self.admin, item=item, size=1,
-            assetstore=self.assetstore)
+            name='fakeImport', creator=self.admin, item=item, size=1, assetstore=self.assetstore)
         fakeImport['imported'] = True
         fakeImport['path'] = '/nonexistent/path/to/file'
-        self.model('file').save(fakeImport)
+        fakeImport = self.model('file').save(fakeImport)
 
         adapter = assetstore_utilities.getAssetstoreAdapter(self.assetstore)
         self.assertTrue(inspect.isgeneratorfunction(adapter.findInvalidFiles))
@@ -296,8 +336,7 @@ class AssetstoreTestCase(base.TestCase):
             for i, info in enumerate(
                     adapter.findInvalidFiles(progress=p), 1):
                 self.assertEqual(info['reason'], 'missing')
-                self.assertIn(info['file']['_id'], (
-                    fakeImport['_id'], fake['_id']))
+                self.assertIn(info['file']['_id'], (fakeImport['_id'], fake['_id']))
             self.assertEqual(i, 2)
             self.assertEqual(p.progress['data']['current'], 3)
             self.assertEqual(p.progress['data']['total'], 3)
@@ -354,6 +393,35 @@ class AssetstoreTestCase(base.TestCase):
         current = self.model('assetstore').getCurrent()
         self.assertEqual(current['_id'], secondStore['_id'])
 
+    def testGetAssetstoreFiles(self):
+        resp = self.request(path='/assetstore', method='GET', user=self.admin)
+        self.assertStatusOk(resp)
+        self.assertEqual(1, len(resp.json))
+        assetstore = self.model('assetstore').load(resp.json[0]['_id'])
+
+        # Simulate the existence of a file within the assetstore
+        folders = self.model('folder').childFolders(
+            self.admin, 'user', user=self.admin)
+        item = self.model('item').createItem(
+            name='x.txt', creator=self.admin, folder=six.next(folders))
+        file = self.model('file').createFile(
+            creator=self.admin, item=item, name='x.txt',
+            size=1, assetstore=assetstore, mimeType='text/plain')
+        file['sha512'] = 'x'  # add this dummy value to simulate real file
+
+        # Make sure we see the file
+        resp = self.request(path='/assetstore/%s/files' % assetstore['_id'],
+                            method='GET', user=self.admin)
+        self.assertStatus(resp, 200)
+        self.assertEqual(len(resp.json), 1)
+        self.assertEqual(resp.json[0]['name'], 'x.txt')
+        # Remove the file and make sure we no longer see it.
+        self.model('file').remove(file)
+        resp = self.request(path='/assetstore/%s/files' % assetstore['_id'],
+                            method='GET', user=self.admin)
+        self.assertStatus(resp, 200)
+        self.assertEqual(len(resp.json), 0)
+
     def testGridFSAssetstoreAdapter(self):
         resp = self.request(path='/assetstore', method='GET', user=self.admin)
         self.assertStatusOk(resp)
@@ -368,13 +436,11 @@ class AssetstoreTestCase(base.TestCase):
             'name': 'New Name',
             'type': AssetstoreType.GRIDFS
         }
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertMissingParameter(resp, 'db')
 
         params['db'] = 'girder_test_assetstore_create_assetstore'
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         assetstore = resp.json
         self.assertEqual(assetstore['name'], 'New Name')
@@ -386,8 +452,9 @@ class AssetstoreTestCase(base.TestCase):
             'db': assetstore['db'],
             'current': True
         }
-        resp = self.request(path='/assetstore/%s' % assetstore['_id'],
-                            method='PUT', user=self.admin, params=params)
+        resp = self.request(
+            path='/assetstore/%s' % assetstore['_id'],
+            method='PUT', user=self.admin, params=params)
         self.assertStatusOk(resp)
         assetstore = self.model('assetstore').load(resp.json['_id'])
         self.assertTrue(assetstore['current'])
@@ -407,8 +474,7 @@ class AssetstoreTestCase(base.TestCase):
             'name': 'Replica Set Name',
             'type': AssetstoreType.GRIDFS,
             'db': 'girder_test_assetstore_create_rs_assetstore',
-            'mongohost': 'mongodb://127.0.0.1:27080,127.0.0.1:27081,'
-                         '127.0.0.1:27082',
+            'mongohost': 'mongodb://127.0.0.1:27080,127.0.0.1:27081,127.0.0.1:27082',
             'replicaset': 'replicaset',
             'current': True
         }
@@ -441,8 +507,7 @@ class AssetstoreTestCase(base.TestCase):
         }
 
         # Validation should fail with empty bucket name
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatus(resp, 400)
         self.assertEqual(resp.json, {
             'type': 'validation',
@@ -452,8 +517,7 @@ class AssetstoreTestCase(base.TestCase):
 
         params['bucket'] = 'bucketname'
         # Validation should fail with a missing bucket
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatus(resp, 400)
         self.assertEqual(resp.json, {
             'type': 'validation',
@@ -463,8 +527,7 @@ class AssetstoreTestCase(base.TestCase):
 
         # Validation should fail with a bogus service name
         params['service'] = 'ftp://nowhere'
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatus(resp, 400)
         del params['service']
 
@@ -475,8 +538,7 @@ class AssetstoreTestCase(base.TestCase):
         bucket = mock_s3.createBucket(botoParams, 'bucketname')
 
         # Create an assetstore
-        resp = self.request(path='/assetstore', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/assetstore', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         assetstore = self.model('assetstore').load(resp.json['_id'])
 
@@ -497,8 +559,7 @@ class AssetstoreTestCase(base.TestCase):
             'size': 1024,
             'mimeType': 'text/plain'
         }
-        resp = self.request(path='/file', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/file', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         self.assertEqual(resp.json['received'], 0)
         self.assertEqual(resp.json['size'], 1024)
@@ -521,9 +582,9 @@ class AssetstoreTestCase(base.TestCase):
         six.assertRegex(self, resp.json['url'], s3Regex)
 
         # Test finalize for a single-chunk upload
-        resp = self.request(path='/file/completion', method='POST',
-                            user=self.admin,
-                            params={'uploadId': singleChunkUpload['_id']})
+        resp = self.request(
+            path='/file/completion', method='POST', user=self.admin,
+            params={'uploadId': singleChunkUpload['_id']})
         self.assertStatusOk(resp)
         self.assertEqual(resp.json['size'], 1024)
         self.assertEqual(resp.json['assetstoreId'], str(assetstore['_id']))
@@ -532,12 +593,11 @@ class AssetstoreTestCase(base.TestCase):
 
         file = self.model('file').load(resp.json['_id'], force=True)
         self.assertTrue('s3Key' in file)
-        self.assertRegexpMatches(file['relpath'], '^/bucketname/foo/bar/')
+        six.assertRegex(self, file['relpath'], '^/bucketname/foo/bar/')
 
         # Test init for a multi-chunk upload
         params['size'] = 1024 * 1024 * 1024 * 5
-        resp = self.request(path='/file', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/file', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
 
         multiChunkUpload = resp.json
@@ -572,9 +632,9 @@ class AssetstoreTestCase(base.TestCase):
         })
 
         # Test finalize for a multi-chunk upload
-        resp = self.request(path='/file/completion', method='POST',
-                            user=self.admin,
-                            params={'uploadId': multiChunkUpload['_id']})
+        resp = self.request(
+            path='/file/completion', method='POST', user=self.admin,
+            params={'uploadId': multiChunkUpload['_id']})
         largeFile = resp.json
         self.assertStatusOk(resp)
         six.assertRegex(self, resp.json['s3FinalizeRequest']['url'], s3Regex)
@@ -582,8 +642,7 @@ class AssetstoreTestCase(base.TestCase):
 
         # Test init for an empty file (should be no-op)
         params['size'] = 0
-        resp = self.request(path='/file', method='POST', user=self.admin,
-                            params=params)
+        resp = self.request(path='/file', method='POST', user=self.admin, params=params)
         emptyFile = resp.json
         self.assertStatusOk(resp)
         self.assertFalse('behavior' in resp.json)
@@ -609,9 +668,9 @@ class AssetstoreTestCase(base.TestCase):
         params = {'contentDisposition': 'inline'}
         inlineRegex = r'response-content-disposition=' + \
                       'inline%3B\+filename%3D%22My\+File.txt%22'
-        resp = self.request(path='/file/%s/download' % largeFile['_id'],
-                            user=self.admin, method='GET', isJson=False,
-                            params=params)
+        resp = self.request(
+            path='/file/%s/download' % largeFile['_id'], user=self.admin, method='GET',
+            isJson=False, params=params)
         self.assertStatus(resp, 303)
         six.assertRegex(self, resp.headers['Location'], s3Regex)
         six.assertRegex(self, resp.headers['Location'], inlineRegex)
@@ -619,8 +678,7 @@ class AssetstoreTestCase(base.TestCase):
         # Test download as part of a streaming zip
         @httmock.all_requests
         def s3_pipe_mock(url, request):
-            if(url.netloc.startswith('s3.amazonaws.com') and
-                    url.scheme == 'https'):
+            if url.netloc.startswith('s3.amazonaws.com') and url.scheme == 'https':
                 return 'dummy file contents'
             else:
                 raise Exception('Unexpected url %s' % url)
@@ -630,8 +688,7 @@ class AssetstoreTestCase(base.TestCase):
                 '/folder/%s/download' % parentFolder['_id'],
                 method='GET', user=self.admin, isJson=False)
             self.assertStatusOk(resp)
-            zip = zipfile.ZipFile(io.BytesIO(self.getBody(resp, text=False)),
-                                  'r')
+            zip = zipfile.ZipFile(io.BytesIO(self.getBody(resp, text=False)), 'r')
             self.assertTrue(zip.testzip() is None)
 
             extracted = zip.read('Public/My File.txt')
@@ -645,8 +702,8 @@ class AssetstoreTestCase(base.TestCase):
                 'destinationId': self.admin['_id']
             }, user=self.admin)
         self.assertStatus(resp, 400)
-        self.assertEqual(resp.json['message'],
-                         'Keys cannot be imported directly underneath a user.')
+        self.assertEqual(
+            resp.json['message'], 'Keys cannot be imported directly underneath a user.')
 
         # Import existing data from S3
         resp = self.request('/folder', method='POST', params={
@@ -708,8 +765,7 @@ class AssetstoreTestCase(base.TestCase):
 
         # Deleting an imported file should not delete it from S3
         with mock.patch('girder.events.daemon.trigger') as daemon:
-            resp = self.request('/item/%s' % str(item['_id']), method='DELETE',
-                                user=self.admin)
+            resp = self.request('/item/%s' % str(item['_id']), method='DELETE', user=self.admin)
             self.assertStatusOk(resp)
             self.assertEqual(len(daemon.mock_calls), 0)
 
@@ -721,8 +777,7 @@ class AssetstoreTestCase(base.TestCase):
         key.set_contents_from_string("test")
 
         # Test delete for a non-empty file
-        resp = self.request(path='/file/%s' % largeFile['_id'],
-                            user=self.admin, method='DELETE')
+        resp = self.request(path='/file/%s' % largeFile['_id'], user=self.admin, method='DELETE')
         self.assertStatusOk(resp)
 
         # The file should be gone now
@@ -740,13 +795,13 @@ class AssetstoreTestCase(base.TestCase):
             time.sleep(0.1)
         self.assertIsNone(bucket.get_key(file['s3Key']))
 
-        resp = self.request(path='/folder/%s' % parentFolder['_id'],
-                            method='DELETE', user=self.admin)
+        resp = self.request(
+            path='/folder/%s' % parentFolder['_id'], method='DELETE', user=self.admin)
         self.assertStatusOk(resp)
 
         # Set the assetstore to read only, attempt to delete it
         assetstore['readOnly'] = True
-        self.model('assetstore').save(assetstore)
+        assetstore = self.model('assetstore').save(assetstore)
 
         def fn(*args, **kwargs):
             raise Exception('get_all_multipart_uploads should not be called')
@@ -756,8 +811,149 @@ class AssetstoreTestCase(base.TestCase):
         sys.modules['boto.s3.bucket'].Bucket.get_all_multipart_uploads = fn
 
         try:
-            resp = self.request(path='/assetstore/%s' % assetstore['_id'],
-                                method='DELETE', user=self.admin)
+            resp = self.request(
+                path='/assetstore/%s' % assetstore['_id'], method='DELETE', user=self.admin)
             self.assertStatusOk(resp)
         finally:
             sys.modules['boto.s3.bucket'].Bucket.get_all_multipart_uploads = old
+
+    def testMoveBetweenAssetstores(self):
+        folder = six.next(self.model('folder').childFolders(
+            self.admin, parentType='user', force=True, filters={
+                'name': 'Public'
+            }))
+
+        resp = self.request(path='/assetstore', method='GET', user=self.admin)
+        self.assertStatusOk(resp)
+        fs_assetstore = resp.json[0]
+
+        # Clear any old DB data
+        base.dropGridFSDatabase('girder_test_assetstore_move_assetstore')
+        params = {
+            'name': 'New Name',
+            'type': AssetstoreType.GRIDFS,
+            'db': 'girder_test_assetstore_move_assetstore'
+        }
+        resp = self.request(path='/assetstore', method='POST', user=self.admin,
+                            params=params)
+        self.assertStatusOk(resp)
+        gridfs_assetstore = resp.json
+
+        # Upload a file - it should go to the fs assetstore
+        uploadData = 'helloworld'
+        params = {
+            'parentType': 'folder',
+            'parentId': folder['_id'],
+            'name': 'sample1',
+            'size': len(uploadData),
+            'mimeType': 'text/plain'
+        }
+        resp = self.request(
+            path='/file', method='POST', user=self.admin, params=params)
+        self.assertStatusOk(resp)
+        upload = resp.json
+        fields = [('offset', 0), ('uploadId', upload['_id'])]
+        files = [('chunk', 'helloWorld.txt', uploadData)]
+        resp = self.multipartRequest(
+            path='/file/chunk', user=self.admin, fields=fields, files=files)
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], fs_assetstore['_id'])
+        uploadedFiles = [resp.json]
+
+        # Upload it again targetting a different assetstore
+        params['assetstoreId'] = gridfs_assetstore['_id']
+        resp = self.request(
+            path='/file', method='POST', user=self.admin, params=params)
+        self.assertStatusOk(resp)
+        upload = resp.json
+        fields = [('offset', 0), ('uploadId', upload['_id'])]
+        files = [('chunk', 'helloWorld.txt', uploadData)]
+        resp = self.multipartRequest(
+            path='/file/chunk', user=self.admin, fields=fields, files=files)
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
+        uploadedFiles.append(resp.json)
+
+        # Replace the first file, directing the replacement to a different
+        # assetstore
+        replaceParams = {
+            'size': len(uploadData),
+            'assetstoreId': gridfs_assetstore['_id'],
+        }
+        resp = self.request(
+            path='/file/%s/contents' % uploadedFiles[0]['_id'], method='PUT',
+            user=self.admin, params=replaceParams)
+        self.assertStatusOk(resp)
+        upload = resp.json
+        fields = [('offset', 0), ('uploadId', upload['_id'])]
+        resp = self.multipartRequest(
+            path='/file/chunk', user=self.admin, fields=fields, files=files)
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
+        uploadedFiles[0] = resp.json
+
+        # Move a file from the gridfs assetstore to the filesystem assetstore
+        resp = self.request(
+            path='/file/%s/move' % uploadedFiles[0]['_id'], method='PUT',
+            user=self.admin, params={'assetstoreId': fs_assetstore['_id']})
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], fs_assetstore['_id'])
+        uploadedFiles[0] = resp.json
+
+        # Doing it again shouldn't change it.
+        resp = self.request(
+            path='/file/%s/move' % uploadedFiles[0]['_id'], method='PUT',
+            user=self.admin, params={'assetstoreId': fs_assetstore['_id']})
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], fs_assetstore['_id'])
+        uploadedFiles[0] = resp.json
+
+        # We should be able to move it back
+        resp = self.request(
+            path='/file/%s/move' % uploadedFiles[0]['_id'], method='PUT',
+            user=self.admin, params={'assetstoreId': gridfs_assetstore['_id']})
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
+        uploadedFiles[0] = resp.json
+
+        # Test moving a file of zero length
+        params['size'] = 0
+        resp = self.request(
+            path='/file', method='POST', user=self.admin, params=params)
+        self.assertStatusOk(resp)
+        uploadedFiles.append(resp.json)
+
+        resp = self.request(
+            path='/file/%s/move' % uploadedFiles[2]['_id'], method='PUT',
+            user=self.admin, params={'assetstoreId': fs_assetstore['_id']})
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], fs_assetstore['_id'])
+        uploadedFiles[2] = resp.json
+
+        # Test preventing the move via an event
+        def stopMove(event):
+            event.preventDefault()
+
+        events.bind('model.upload.movefile', 'assetstore_test', stopMove)
+        try:
+            resp = self.request(
+                path='/file/%s/move' % uploadedFiles[0]['_id'], method='PUT',
+                user=self.admin, params={'assetstoreId': fs_assetstore['_id']},
+                isJson=False)
+            self.assertFalse('Move should have been prevented')
+        except AssertionError as exc:
+            self.assertIn('could not be moved to assetstore', str(exc))
+        events.unbind('model.upload.movefile', 'assetstore_test')
+
+        # Test files big enough to be multi-chunk
+        chunkSize = self.model('upload')._getChunkSize()
+        data = six.BytesIO(b' ' * chunkSize * 2)
+        uploadedFiles.append(self.model('upload').uploadFromFile(
+            data, chunkSize * 2, 'sample', parentType='folder',
+            parent=folder, assetstore=fs_assetstore))
+        resp = self.request(
+            path='/file/%s/move' % uploadedFiles[3]['_id'], method='PUT',
+            user=self.admin, params={'assetstoreId': gridfs_assetstore['_id']})
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
+        uploadedFiles[3] = resp.json

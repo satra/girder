@@ -17,10 +17,9 @@
 #  limitations under the License.
 ###############################################################################
 
-import cherrypy
-
 from ..describe import Description, describeRoute
-from ..rest import Resource, RestException, filtermodel, loadmodel
+from ..rest import Resource, RestException, filtermodel, loadmodel, \
+    setResponseHeader
 from girder.utility import ziputil
 from girder.constants import AccessType, TokenScope
 from girder.api import access
@@ -45,7 +44,7 @@ class Item(Resource):
     @access.public(scope=TokenScope.DATA_READ)
     @filtermodel(model='item')
     @describeRoute(
-        Description('Search for an item by certain properties.')
+        Description('List or search for items.')
         .responseClass('Item')
         .param('folderId', "Pass this to list all items in a folder.",
                required=False)
@@ -114,6 +113,8 @@ class Item(Resource):
         .param('folderId', 'The ID of the parent folder.')
         .param('name', 'Name for the item.')
         .param('description', "Description for the item.", required=False)
+        .param('reuseExisting', 'Return existing item (by name) if it exists.',
+               required=False, dataType='boolean')
         .errorResponse()
         .errorResponse('Write access was denied on the parent folder.', 403)
     )
@@ -123,12 +124,14 @@ class Item(Resource):
         user = self.getCurrentUser()
         name = params['name'].strip()
         description = params.get('description', '').strip()
+        reuseExisting = params.get('reuseExisting', False)
 
         folder = self.model('folder').load(id=params['folderId'], user=user,
                                            level=AccessType.WRITE, exc=True)
 
         return self.model('item').createItem(
-            folder=folder, name=name, creator=user, description=description)
+            folder=folder, name=name, creator=user, description=description,
+            reuseExisting=reuseExisting)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @loadmodel(model='item', level=AccessType.WRITE)
@@ -190,9 +193,10 @@ class Item(Resource):
         return self.model('item').setMetadata(item, metadata)
 
     def _downloadMultifileItem(self, item, user):
-        cherrypy.response.headers['Content-Type'] = 'application/zip'
-        cherrypy.response.headers['Content-Disposition'] =\
-            'attachment; filename="%s%s"' % (item['name'], '.zip')
+        setResponseHeader('Content-Type', 'application/zip')
+        setResponseHeader(
+            'Content-Disposition',
+            'attachment; filename="%s%s"' % (item['name'], '.zip'))
 
         def stream():
             zip = ziputil.ZipGenerator(item['name'])

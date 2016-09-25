@@ -22,6 +22,7 @@ import celery
 from girder import events
 from girder.constants import AccessType
 from girder.plugins.jobs.constants import JobStatus
+from girder.utility import setting_utilities
 from girder.utility.model_importer import ModelImporter
 
 _celeryapp = None
@@ -59,12 +60,9 @@ def getCeleryApp():
 
     if _celeryapp is None:
         settings = ModelImporter.model('setting')
-        backend = settings.get(PluginSettings.BACKEND) or \
-            'amqp://guest@localhost/'
-        broker = settings.get(PluginSettings.BROKER) or \
-            'amqp://guest@localhost/'
-        _celeryapp = celery.Celery(
-            'girder_worker', backend=backend, broker=broker)
+        backend = settings.get(PluginSettings.BACKEND) or 'amqp://guest@localhost/'
+        broker = settings.get(PluginSettings.BROKER) or 'amqp://guest@localhost/'
+        _celeryapp = celery.Celery('girder_worker', backend=backend, broker=broker)
     return _celeryapp
 
 
@@ -79,31 +77,29 @@ def schedule(event):
         # Stop event propagation since we have taken care of scheduling.
         event.stopPropagation()
 
+        task = job.get('celeryTaskName', 'girder_worker.run')
+
         # Send the task to celery
-        asyncResult = getCeleryApp().send_task(
-            'girder_worker.run', job['args'], job['kwargs'])
+        asyncResult = getCeleryApp().send_task(task, job['args'], job['kwargs'])
 
         # Set the job status to queued and record the task ID from celery.
-        job['celeryTaskId'] = asyncResult.task_id
-        ModelImporter.model('job', 'jobs').updateJob(
-            job, status=JobStatus.QUEUED)
+        ModelImporter.model('job', 'jobs').updateJob(job, status=JobStatus.QUEUED, otherFields={
+            'celeryTaskId': asyncResult.task_id
+        })
 
 
-def validateSettings(event):
+@setting_utilities.validator({
+    PluginSettings.BROKER,
+    PluginSettings.BACKEND
+})
+def validateSettings(doc):
     """
     Handle plugin-specific system settings. Right now we don't do any
     validation for the broker or backend URL settings, but we do reinitialize
     the celery app object with the new values.
     """
     global _celeryapp
-    key = event.info['key']
-
-    if key == PluginSettings.BROKER:
-        _celeryapp = None
-        event.preventDefault()
-    elif key == PluginSettings.BACKEND:
-        _celeryapp = None
-        event.preventDefault()
+    _celeryapp = None
 
 
 def validateJobStatus(event):
@@ -115,7 +111,5 @@ def validateJobStatus(event):
 def load(info):
     events.bind('jobs.schedule', 'worker', schedule)
     events.bind('jobs.status.validate', 'worker', validateJobStatus)
-    events.bind('model.setting.validate', 'worker', validateSettings)
 
-    ModelImporter.model('job', 'jobs').exposeFields(
-        AccessType.SITE_ADMIN, {'celeryTaskId'})
+    ModelImporter.model('job', 'jobs').exposeFields(AccessType.SITE_ADMIN, {'celeryTaskId'})
