@@ -45,9 +45,21 @@ describe('Test collection actions', function () {
         }, 'collection list to appear');
 
         runs(function () {
-            expect($('.g-collection-list-entry').text().match('collName0').length > 0);
-        });
+            expect($('.g-collection-list-entry').text()).toContain('collName0');
+            expect($('.g-collection-subtitle').text()).toBe('Show description');
+            expect($('.g-collection-description:visible').length).toBe(0);
 
+            // Show description
+            $('.g-show-description').click();
+            expect($('.g-collection-subtitle').text()).toBe('Hide description');
+            expect($('.g-collection-description:visible').length).toBe(1);
+            expect($('.g-collection-description').text().trim()).toBe('coll Desc 0');
+
+            // Hide description
+            $('.g-show-description').click();
+            expect($('.g-collection-subtitle').text()).toBe('Show description');
+            expect($('.g-collection-description:visible').length).toBe(0);
+        });
     });
 
     it('create another collection',
@@ -74,11 +86,11 @@ describe('Test collection actions', function () {
         girderTest.waitForDialog();
 
         waitsFor(function () {
-            return $("#g-description").is(':visible');
+            return $('#collection-description-write .g-markdown-text').is(':visible');
         }, 'description text area to appear');
 
         runs(function () {
-            $('#g-description').val('New Description');
+            $('#collection-description-write .g-markdown-text').val('New Description');
             $('.g-save-collection').click();
         });
 
@@ -87,11 +99,11 @@ describe('Test collection actions', function () {
                    $('#g-dialog-container:visible').length === 0;
         }, 'dialog to fully disappear');
         waitsFor(function () {
-            return girder.numberOutstandingRestRequests() === 0;
+            return girder.rest.numberOutstandingRestRequests() === 0;
         }, 'dialog rest requests to finish');
 
         waitsFor(function () {
-            return $('.g-collection-description').text().match('New Description');
+            return $('.g-collection-description').text().trim().match('New Description');
         }, 'description to be updated to new text');
 
         waitsFor(function () {

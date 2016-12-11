@@ -129,7 +129,7 @@ describe('Test item creation, editing, and deletion', function () {
 
         runs(function () {
             $('#g-name').val('Test Item Name');
-            $('#g-description').val('Test Item Description');
+            $('#item-description-write .g-markdown-text').val('Test Item Description');
             $('.g-save-item').click();
         });
 
@@ -148,7 +148,7 @@ describe('Test item creation, editing, and deletion', function () {
 
         runs(function () {
             expect($('.g-item-name').text()).toBe("Test Item Name");
-            expect($('.g-item-description').text()).toBe("Test Item Description");
+            expect($('.g-item-description').text().trim()).toBe("Test Item Description");
         });
     });
 
@@ -168,7 +168,7 @@ describe('Test item creation, editing, and deletion', function () {
         runs(function() {
             var id = window.location.hash.split('/')[1].split('?')[0];
             /* Create a link file */
-            girder.restRequest({
+            girder.rest.restRequest({
                 path: 'file', type: 'POST',
                 data: {parentType: 'item', parentId: id, name: 'File 1',
                        linkUrl: 'http://nowhere.com/file1'

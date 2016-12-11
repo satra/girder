@@ -14,230 +14,146 @@
  * limitations under the License.
  */
 
-/**
- * Define tasks that bundle and compile files for deployment.
- */
+var path = require('path');
+var _ = require('underscore');
+var noptFix = require('nopt-grunt-fix');
+
+var webpack = require('webpack');
+var webpackGlobalConfig = require('./webpack.config.js');
+var paths = require('./webpack.paths.js');
+var customWebpackPlugins = require('./webpack.plugins.js');
+
 module.exports = function (grunt) {
-    var path = require('path');
+    noptFix(grunt);
     var environment = grunt.option('env') || 'dev';
-    var debugJs = grunt.option('debug-js') || false;
-    var uglifyOptions = {
-        ASCIIOnly: true,
-        sourceMap: environment === 'dev',
-        sourceMapIncludeSources: true,
-        report: 'min'
-    };
+    var progress = !grunt.option('no-progress');
+
+    var webpackConfig = _.extend({}, webpackGlobalConfig);
 
     if (['dev', 'prod'].indexOf(environment) === -1) {
         grunt.fatal('The "env" argument must be either "dev" or "prod".');
     }
+    var isDev = environment === 'dev';
+    if (!process.env.BABEL_ENV) {
+        process.env.BABEL_ENV = environment;
+    }
+    if (!process.env.NODE_ENV) {
+        process.env.NODE_ENV = environment;
+    }
+    var isWatch = grunt.option('watch');
 
-    if (debugJs) {
-        console.log('Building JS in debug mode'.yellow);
-        uglifyOptions.beautify = {
-            beautify: true
-        };
-        uglifyOptions.mangle = false;
-        uglifyOptions.compress = false;
+    // Extend the global webpack config options with environment-specific changes
+    if (isDev) {
+        webpackConfig.devtool = 'source-map';
+        webpackConfig.cache = true;
+        webpackConfig.plugins.push(new webpack.LoaderOptionsPlugin({
+            minimize: false,
+            debug: true
+        }));
+    } else {
+        webpackConfig.devtool = false;
+        webpackConfig.cache = false;
+        webpackConfig.plugins = webpackConfig.plugins.concat([
+            // https://github.com/webpack/webpack/issues/283
+            // https://github.com/webpack/webpack/issues/2061#issuecomment-228932941
+            // https://gist.github.com/sokra/27b24881210b56bbaff7#loader-options--minimize
+            // but unclear and confusing as to how far it has been implemented
+            new webpack.LoaderOptionsPlugin({
+                minimize: true,
+                debug: false
+            }),
+            new webpack.optimize.DedupePlugin(),
+            new webpack.optimize.UglifyJsPlugin({
+                // ASCIIOnly: true,
+                // sourceMapIncludeSources: true,
+                compress: {
+                    warnings: false
+                },
+                output: {
+                    comments: false
+                }
+            })
+        ]);
     }
 
-    grunt.config.merge({
-        jade: {
-            options: {
-                client: true,
-                compileDebug: false,
-                doctype: 'html',
-                namespace: 'girder.templates',
-                processName: function (filename) {
-                    return path.basename(filename, '.jade');
-                }
+    // https://github.com/webpack/grunt-webpack
+    var gruntWebpackConfig = {
+        stats: {
+            children: false,
+            colors: true,
+            modules: false,
+            reasons: false,
+            errorDetails: true
+        },
+        progress: progress,    // show progress
+        failOnError: !isWatch, // report error to grunt if webpack find errors; set to false if
+        watch: isWatch,        // use webpacks watcher (you need to keep the grunt process alive)
+        keepalive: isWatch,    // don't finish the grunt task (in combination with the watch option)
+        inline: false,         // embed the webpack-dev-server runtime into the bundle (default false)
+        hot: false             // adds HotModuleReplacementPlugin and switch the server to hot mode
+    };
+
+    var config = {
+        webpack: {
+            options: _.extend({}, webpackConfig, gruntWebpackConfig),
+            core_lib: {
+                entry: {
+                    girder_lib: [paths.web_src]
+                },
+                output: {
+                    library: '[name]'
+
+                },
+                plugins: [
+                    // Remove this if it turns out we don't want to use it for every bundle target.
+                    new webpack.DllPlugin({
+                        path: path.join(paths.web_built, '[name]-manifest.json'),
+                        name: '[name]'
+                    })
+                ]
             },
-            core: {
-                files: {
-                    'clients/web/static/built/templates.js': [
-                        'clients/web/src/templates/**/*.jade'
-                    ]
-                }
+            core_app: {
+                entry: {
+                    girder_app: [path.join(paths.web_src, 'main.js')]
+                },
+                plugins: [
+                    new customWebpackPlugins.DllReferenceByPathPlugin({
+                        context: '.',
+                        manifest: path.join(paths.web_built, 'girder_lib-manifest.json')
+                    })
+                ]
             }
         },
-
-        copy: {
-            swagger: {
-                files: [{
-                    expand: true,
-                    cwd: 'node_modules/swagger-ui/dist',
-                    src: ['lib/**', 'css/**', 'images/**', 'swagger-ui.min.js'],
-                    dest: 'clients/web/static/built/swagger'
-                }]
-            },
-            jsoneditor: {
-                files: [{
-                    expand: true,
-                    cwd: 'node_modules/jsoneditor/dist',
-                    src: ['img/**'],
-                    dest: 'clients/web/static/built/jsoneditor'
-                }]
-            }
-        },
-
-        stylus: {
-            core: {
-                files: {
-                    'clients/web/static/built/girder.app.min.css': [
-                        'clients/web/src/stylesheets/**/*.styl',
-                        '!clients/web/src/stylesheets/apidocs/*.styl'
-                    ],
-                    'clients/web/static/built/swagger/docs.css': [
-                        'clients/web/src/stylesheets/apidocs/*.styl'
-                    ]
-                }
-            }
-        },
-
-        concat: {
-            options: {
-                stripBanners: {
-                    block: true,
-                    line: true
-                }
-            },
-            ext_css: {
-                files: {
-                    'clients/web/static/built/girder.ext.min.css': [
-                        'node_modules/bootstrap/dist/css/bootstrap.min.css',
-                        'node_modules/bootstrap-switch/dist/css/bootstrap3/bootstrap-switch.min.css',
-                        'node_modules/eonasdan-bootstrap-datetimepicker/build/css/bootstrap-datetimepicker.min.css',
-                        'node_modules/jsoneditor/dist/jsoneditor.min.css',
-                        'node_modules/as-jqplot/dist/jquery.jqplot.min.css'
-                    ]
-                }
-            }
-        },
-
-        uglify: {
-            options: uglifyOptions,
-            app: {
-                files: {
-                    'clients/web/static/built/girder.app.min.js': [
-                        'clients/web/static/built/templates.js',
-                        'clients/web/src/init.js',
-                        'clients/web/src/girder-version.js',
-                        'clients/web/src/view.js',
-                        'clients/web/src/app.js',
-                        'clients/web/src/router.js',
-                        'clients/web/src/utilities/**/*.js',
-                        'clients/web/src/plugin_utils.js',
-                        'clients/web/src/collection.js',
-                        'clients/web/src/model.js',
-                        'clients/web/src/models/**/*.js',
-                        'clients/web/src/collections/**/*.js',
-                        'clients/web/src/views/**/*.js'
-                    ],
-                    'clients/web/static/built/girder.main.min.js': [
-                        'clients/web/src/main.js'
-                    ]
-                }
-            },
-            ext_js: {
-                files: {
-                    'clients/web/static/built/girder.ext.min.js': [
-                        'node_modules/jquery/dist/jquery.js',
-                        'node_modules/jade/runtime.js',
-                        'node_modules/underscore/underscore.js',
-                        'node_modules/backbone/backbone.js',
-                        'node_modules/remarkable/dist/remarkable.js',
-                        'node_modules/jsoneditor/dist/jsoneditor.js',
-                        'node_modules/bootstrap/dist/js/bootstrap.js',
-                        'node_modules/bootstrap-switch/dist/js/bootstrap-switch.js',
-                        'node_modules/eonasdan-bootstrap-datetimepicker/bower_components/moment/moment.js',
-                        'node_modules/eonasdan-bootstrap-datetimepicker/src/js/bootstrap-datetimepicker.js',
-                        'node_modules/d3/d3.js',
-                        'node_modules/as-jqplot/dist/jquery.jqplot.js',
-                        'node_modules/as-jqplot/dist/plugins/jqplot.pieRenderer.js',
-                        'node_modules/sprintf-js/src/sprintf.js'
-                    ]
-                }
-            }
-        },
-
-        symlink: {
-            options: {
-                overwrite: true,
-                force: true
-            },
-            legacy_names: {
-                // Provide static files under old names, for compatibility
-                files: [{
-                    src: ['clients/web/static/built/girder.app.min.js'],
-                    dest: 'clients/web/static/built/app.min.js'
-                }, {
-                    src: ['clients/web/static/built/girder.app.min.css'],
-                    dest: 'clients/web/static/built/app.min.css'
-                }, {
-                    src: ['clients/web/static/built/girder.main.min.js'],
-                    dest: 'clients/web/static/built/main.min.js'
-                }, {
-                    src: ['clients/web/static/built/girder.ext.min.js'],
-                    dest: 'clients/web/static/built/libs.min.js'
-                }, {
-                    // This provides more than just Bootstrap, but that no
-                    // longer exists as a standalone file
-                    // Note, girder.ext.min.css was never released as another
-                    // name
-                    src: ['clients/web/static/built/girder.ext.min.css'],
-                    dest: 'clients/web/static/lib/bootstrap/css/bootstrap.min.css'
-                }, {
-                    src: ['clients/web/static/built/girder.ext.min.css'],
-                    dest: 'clients/web/static/lib/bootstrap/css/bootstrap-switch.min.css'
-                }, {
-                    src: ['clients/web/static/built/girder.ext.min.css'],
-                    dest: 'clients/web/static/built/jsoneditor/jsoneditor.min.css'
-                }, {
-                    src: ['clients/web/static/built/girder.ext.min.css'],
-                    dest: 'clients/web/static/lib/jqplot/css/jquery.jqplot.min.css'
-                }, {
-                    src: ['clients/web/static/built/fontello'],
-                    dest: 'clients/web/static/lib/fontello'
-                }]
-            }
-        },
-
+        // The grunt-contrib-watch task can be used with webpack, as described here:
+        // https://github.com/webpack/webpack-with-common-libs/blob/master/Gruntfile.js
+        // BUT it is A LOT SLOWER than using the built-in watch options in grunt-webpack
         watch: {
-            stylus_core: {
-                files: ['clients/web/src/stylesheets/**/*.styl'],
-                tasks: ['stylus:core']
-            },
-            js_core: {
-                files: [
-                    'clients/web/src/**/*.js',
-                    'clients/static/built/templates.js'
-                ],
-                tasks: ['uglify:app']
-            },
-            jade_core: {
-                files: ['clients/web/src/templates/**/*.jade'],
-                tasks: ['jade:core', 'uglify:app']
+            warn: {
+                files: [],
+                tasks: 'warnWatch',
+                options: {
+                    atBegin: true
+                }
             }
         },
-
-        init: {
-            'uglify:ext_js': {},
-            'copy:swagger': {},
-            'copy:jsoneditor': {},
-            'concat:ext_css': {}
-        },
-
         default: {
-            'stylus:core': {},
-            'jade:core': {
+            build: {
                 dependencies: ['version-info']
-            },
-            'uglify:app': {
-                dependencies: ['jade:core']
-            },
-            'symlink:legacy_names': {
-                dependencies: ['uglify:app']
             }
         }
+    };
+
+    // Need an alias that can be used as a dependency (for testing). It will then trigger dev or
+    // prod based on options passed
+    grunt.registerTask('build', 'Build the web client.', [
+        'webpack:core_lib',
+        'webpack:core_app'
+    ]);
+
+    // Warn about not using grunt-contrib-watch, use webpack:watch or grunt --watch instead
+    grunt.registerTask('warnWatch', function () {
+        grunt.log.warn('WARNING: the "watch" task will not build; run grunt --watch'.yellow);
     });
+
+    grunt.config.merge(config);
 };

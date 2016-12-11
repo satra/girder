@@ -21,6 +21,7 @@ import time
 
 from tests import base
 from girder import events
+from girder.constants import AccessType
 from girder.models.model_base import ValidationException
 
 
@@ -194,7 +195,8 @@ class JobsTestCase(base.TestCase):
             title='A job', type='t', user=self.users[1], public=True)
 
         job['_some_other_field'] = 'foo'
-        job = self.model('job', 'jobs').save(job)
+        jobModel = self.model('job', 'jobs')
+        job = jobModel.save(job)
 
         resp = self.request('/job/%s' % job['_id'])
         self.assertStatusOk(resp)
@@ -207,18 +209,12 @@ class JobsTestCase(base.TestCase):
         self.assertTrue('kwargs' in resp.json)
         self.assertTrue('args' in resp.json)
 
-        def filterJob(event):
-            event.info['job']['_some_other_field'] = 'bar'
-            event.addResponse({
-                'exposeFields': ['_some_other_field'],
-                'removeFields': ['created']
-            })
-
-        events.bind('jobs.filter', 'test', filterJob)
+        jobModel.exposeFields(level=AccessType.READ, fields={'_some_other_field'})
+        jobModel.hideFields(level=AccessType.READ, fields={'created'})
 
         resp = self.request('/job/%s' % job['_id'])
         self.assertStatusOk(resp)
-        self.assertEqual(resp.json['_some_other_field'], 'bar')
+        self.assertEqual(resp.json['_some_other_field'], 'foo')
         self.assertTrue('created' not in resp.json)
 
     def testJobProgressAndNotifications(self):
@@ -289,7 +285,8 @@ class JobsTestCase(base.TestCase):
         self.assertEqual(statusNotify['type'], 'job_status')
         self.assertEqual(statusNotify['data']['_id'], str(job['_id']))
         self.assertEqual(int(statusNotify['data']['status']), JobStatus.ERROR)
-        self.assertTrue('kwargs' not in statusNotify['data'])
+        self.assertNotIn('kwargs', statusNotify['data'])
+        self.assertNotIn('log', statusNotify['data'])
 
         self.assertEqual(progressNotify['type'], 'progress')
         self.assertEqual(progressNotify['data']['title'], job['title'])
@@ -391,3 +388,19 @@ class JobsTestCase(base.TestCase):
         job = jobModel.createJob(title='test', type='x', user=self.users[0])
         job = jobModel.updateJob(job, otherFields={'other': 'fields'})
         self.assertEqual(job['other'], 'fields')
+
+    def testCancelJob(self):
+        jobModel = self.model('job', 'jobs')
+        job = jobModel.createJob(title='test', type='x', user=self.users[0])
+        # add to the log
+        job = jobModel.updateJob(job, log='entry 1\n')
+        # Reload without the log
+        job = jobModel.load(id=job['_id'], force=True)
+        self.assertEqual(len(job.get('log', [])), 0)
+        # Cancel
+        job = jobModel.cancelJob(job)
+        self.assertEqual(job['status'], JobStatus.CANCELED)
+        # Reloading should still have the log and be canceled
+        job = jobModel.load(id=job['_id'], force=True, includeLog=True)
+        self.assertEqual(job['status'], JobStatus.CANCELED)
+        self.assertEqual(len(job.get('log', [])), 1)

@@ -77,7 +77,7 @@ class File(Resource):
         .param('reference', 'If included, this information is passed to the '
                'data.process event when the upload is complete.',
                required=False)
-        .param('assetstoreId', 'Direct the upload to a specific assetstore.',
+        .param('assetstoreId', 'Direct the upload to a specific assetstore (admin-only).',
                required=False)
         .errorResponse()
         .errorResponse('Write access was denied on the parent folder.', 403)
@@ -107,11 +107,14 @@ class File(Resource):
             return self.model('file').filter(
                 self.model('file').createLinkFile(
                     url=params['linkUrl'], parent=parent, name=params['name'],
-                    parentType=parentType, creator=user), user)
+                    parentType=parentType, creator=user, size=params.get('size'),
+                    mimeType=mimeType), user)
         else:
             self.requireParams('size', params)
             assetstore = None
             if params.get('assetstoreId'):
+                self.requireAdmin(
+                    user, message='You must be an admin to select a destination assetstore.')
                 assetstore = self.model('assetstore').load(
                     params['assetstoreId'])
             try:
@@ -137,10 +140,10 @@ class File(Resource):
         .notes('This is only required in certain non-standard upload '
                'behaviors. Clients should know which behavior models require '
                'the finalize step to be called in their behavior handlers.')
-        .param('uploadId', 'The ID of the upload record.', paramType='form')
-        .errorResponse('ID was invalid.')
-        .errorResponse('The upload does not require finalization.')
-        .errorResponse('Not enough bytes have been uploaded.')
+        .param('uploadId', 'The ID of the upload record.', paramType='formData')
+        .errorResponse(('ID was invalid.',
+                        'The upload does not require finalization.',
+                        'Not enough bytes have been uploaded.'))
         .errorResponse('You are not the user who initiated the upload.', 403)
     )
     def finalizeUpload(self, params):
@@ -193,16 +196,16 @@ class File(Resource):
     @describeRoute(
         Description('Upload a chunk of a file with multipart/form-data.')
         .consumes('multipart/form-data')
-        .param('uploadId', 'The ID of the upload record.', paramType='form')
+        .param('uploadId', 'The ID of the upload record.', paramType='formData')
         .param('offset', 'Offset of the chunk in the file.', dataType='integer',
-               paramType='form')
+               paramType='formData')
         .param('chunk', 'The actual bytes of the chunk. For external upload '
                'behaviors, this may be set to an opaque string that will be '
                'handled by the assetstore adapter.',
-               dataType='File', paramType='body')
-        .errorResponse('ID was invalid.')
-        .errorResponse('Received too many bytes.')
-        .errorResponse('Chunk is smaller than the minimum size.')
+               dataType='file', paramType='formData')
+        .errorResponse(('ID was invalid.',
+                        'Received too many bytes.',
+                        'Chunk is smaller than the minimum size.'))
         .errorResponse('You are not the user who initiated the upload.', 403)
         .errorResponse('Failed to store upload.', 500)
     )
@@ -389,8 +392,9 @@ class File(Resource):
             return self.model('file').filter(
                 self.model('upload').finalizeUpload(upload), user)
 
-    @access.user(scope=TokenScope.DATA_WRITE)
+    @access.admin(scope=TokenScope.DATA_WRITE)
     @loadmodel(model='file', level=AccessType.WRITE)
+    @filtermodel(model='file')
     @describeRoute(
         Description('Move a file to a different assetstore.')
         .param('id', 'The ID of the file.', paramType='path')

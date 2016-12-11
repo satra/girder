@@ -39,21 +39,8 @@ class Collection(AccessControlledModel):
             'description': 1
         })
 
-        self.exposeFields(level=AccessType.READ, fields=(
-            '_id', 'name', 'description', 'public', 'created', 'updated',
-            'size'))
-
-    def filter(self, *args, **kwargs):
-        """
-        Preserved override for kwarg backwards compatibility. Prior to the
-        refactor for centralizing model filtering, this method's first formal
-        parameter was called "collection", whereas the centralized version's
-        first parameter is called "doc". This override simply detects someone
-        using the old kwarg and converts it to the new form.
-        """
-        if 'collection' in kwargs:
-            args = [kwargs.pop('collection')] + list(args)
-        return super(Collection, self).filter(*args, **kwargs)
+        self.exposeFields(level=AccessType.READ, fields={
+            '_id', 'name', 'description', 'public', 'publicFlags', 'created', 'updated', 'size'})
 
     def validate(self, doc):
         doc['name'] = doc['name'].strip()
@@ -221,7 +208,7 @@ class Collection(AccessControlledModel):
         return count
 
     def setAccessList(self, doc, access, save=False, recurse=False, user=None,
-                      progress=noProgress, setPublic=None):
+                      progress=noProgress, setPublic=None, publicFlags=None, force=False):
         """
         Overrides AccessControlledModel.setAccessList to add a recursive
         option. When `recurse=True`, this will set the access list on all
@@ -244,11 +231,22 @@ class Collection(AccessControlledModel):
         :param setPublic: Pass this if you wish to set the public flag on the
             resources being updated.
         :type setPublic: bool or None
+        :param publicFlags: Pass this if you wish to set the public flag list on
+            resources being updated.
+        :type publicFlags: flag identifier str, or list/set/tuple of them, or None
+        :param force: Set this to True to set the flags regardless of the passed in
+            user's permissions.
+        :type force: bool
         """
         progress.update(increment=1, message='Updating ' + doc['name'])
         if setPublic is not None:
             self.setPublic(doc, setPublic, save=False)
-        doc = AccessControlledModel.setAccessList(self, doc, access, save=save)
+
+        if publicFlags is not None:
+            doc = self.setPublicFlags(doc, publicFlags, user=user, save=False, force=force)
+
+        doc = AccessControlledModel.setAccessList(
+            self, doc, access, user=user, save=save, force=force)
 
         if recurse:
             cursor = self.model('folder').find({
@@ -262,7 +260,7 @@ class Collection(AccessControlledModel):
             for folder in folders:
                 self.model('folder').setAccessList(
                     folder, access, save=True, recurse=True, user=user,
-                    progress=progress, setPublic=setPublic)
+                    progress=progress, setPublic=setPublic, publicFlags=publicFlags)
 
         return doc
 
@@ -317,14 +315,13 @@ class Collection(AccessControlledModel):
             return sum(1 for _ in folderModel.filterResultsByPermission(
                 cursor=folders, user=user, level=level))
 
-    def updateSize(self, doc, user=None):
+    def updateSize(self, doc):
         """
         Recursively recomputes the size of this collection and its underlying
         folders and fixes the sizes as needed.
 
         :param doc: The collection.
         :type doc: dict
-        :param user: (deprecated) Not used.
         """
         size = 0
         fixes = 0

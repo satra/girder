@@ -16,7 +16,7 @@ Document Conventions
 
 This User Guide is written for end-users of Girder, rather than developers. If you
 have suggestions or questions about this documentation, feel free to contact us
-`on Github <https://github.com/girder/girder>`_,
+`on GitHub <https://github.com/girder/girder>`_,
 `the mailing list <http://public.kitware.com/mailman/listinfo/girder-users>`_ or,
 `through Kitware support <mailto:kitware@kitware.com>`_.
 
@@ -169,7 +169,7 @@ the permissions below it. The levels are:
 1) No permission (cannot view, edit, or delete a resource)
 2) ``READ`` permission (can view and download resources)
 3) ``WRITE`` permission (includes ``READ`` permission, can edit the properties of a resource)
-4) ``ADMIN`` permission (includes ``READ`` and ``WRITE`` permission, can delete
+4) ``ADMIN`` also known as ``own`` permission,  (includes ``READ`` and ``WRITE`` permission, can delete
    the resource and also control access on it)
 
 A site administrator always has permission to take any action.

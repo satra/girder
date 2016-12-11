@@ -34,16 +34,18 @@ you can just type ``grunt`` in your shell to run tasks.
    that, run ``npm install -g grunt-cli``. Note that this command requires ``sudo`` on many
    systems.
 
-It is recommended during development to make use of the ``grunt-watch`` tool. Running
-``grunt watch`` in the root of the repository will watch for JavaScript, Stylus, and
-Jade changes in order to rebuild them on-the-fly. If you do not run ``grunt watch``
-while making code changes, you will need to run the ``grunt`` command to manually
-rebuild the web client in order to see your changes reflected.
+If you are doing front-end development, it's much faster to use a *watch* process to perform
+automatic fast rebuilds of your code whenever you make changes to source files. If you are making
+changes to Girder's core web client, run the following watch command: ::
 
-Note that some browser debugging tools do not play well with local variable
-mangling in JavaScript. If you want to use such a debugger and need to work around this,
-run ``grunt`` or ``grunt watch`` with the additional argument ``--debug-js``.
-This will prevent name mangling in the minified output.
+    girder-install web --watch
+
+If you are developing a plugin and want to rebuild when you change its source, run: ::
+
+    girder-install web --watch-plugin my_plugin_name
+
+When you want to end the watch process, press Ctrl+C (or however you would normally terminate a
+process in your terminal).
 
 Vagrant
 ^^^^^^^

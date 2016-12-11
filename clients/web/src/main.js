@@ -1,9 +1,21 @@
-// When all scripts are loaded, we invoke the application
-$(function () {
-    girder.events.trigger('g:appload.before');
-    girder.mainApp = new girder.App({
-        el: 'body',
-        parentView: null
-    });
-    girder.events.trigger('g:appload.after', girder.mainApp);
-});
+import $ from 'jquery';
+import _ from 'underscore';
+import Backbone from 'backbone';
+import moment from 'moment';
+import * as girder from 'girder';
+
+window.girder = girder;
+
+// Some cross-browser globals
+if (!window.console) {
+    window.console = {
+        log: $.noop,
+        error: $.noop
+    };
+}
+
+// For testing and convenience, available now because of testUtils.js reliance on $
+window.$ = $;
+window._ = _;
+window.moment = moment;
+window.Backbone = Backbone;
