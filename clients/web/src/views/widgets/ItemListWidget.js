@@ -31,6 +31,7 @@ var ItemListWidget = View.extend({
           _.has(settings, 'viewLinks') ? settings.viewLinks : true);
         this._showSizes = (
           _.has(settings, 'showSizes') ? settings.showSizes : true);
+        this.accessLevel = settings.accessLevel;
 
         new LoadingAnimation({
             el: this.$el,
@@ -39,12 +40,17 @@ var ItemListWidget = View.extend({
 
         this.collection = new ItemCollection();
         this.collection.append = true; // Append, don't replace pages
+        this.collection.filterFunc = settings.itemFilter;
+
         this.collection.on('g:changed', function () {
+            if (this.accessLevel !== undefined) {
+                this.collection.each((model) => {
+                    model.set('_accessLevel', this.accessLevel);
+                });
+            }
             this.render();
             this.trigger('g:changed');
-        }, this).fetch({
-            folderId: settings.folderId
-        });
+        }, this).fetch({ folderId: settings.folderId });
     },
 
     render: function () {
@@ -85,6 +91,9 @@ var ItemListWidget = View.extend({
      * Insert an item into the collection and re-render it.
      */
     insertItem: function (item) {
+        if (this.accessLevel !== undefined) {
+            item.set('_accessLevel', this.accessLevel);
+        }
         this.collection.add(item);
         this.trigger('g:changed');
         this.render();

@@ -13,15 +13,14 @@ javascript_tests_init()
 if(RUN_CORE_TESTS)
   add_eslint_test(grunt_main Gruntfile.js)
   add_eslint_test(grunt_modules grunt_tasks)
+  add_eslint_test(test_specs clients/web/test)
 
   add_python_style_test(python_static_analysis_core "${PROJECT_SOURCE_DIR}/girder")
   add_python_style_test(python_static_analysis_core_tests "${PROJECT_SOURCE_DIR}/tests")
   add_python_style_test(python_static_analysis_ansible_client_tests
     "${PROJECT_SOURCE_DIR}/devops/ansible/roles/girder/library")
 
-  # These are performed approximately in the order listed.  upload is slower, so
-  # start it first, so that if we have parallelism it doesn't hold things up much
-  add_python_test(upload RESOURCE_LOCKS replicaset REQUIRED_FILES "${MONGOD_EXECUTABLE}")
+  # These are performed approximately in the order listed.
   add_python_test(api_describe)
   add_python_test(api_key)
   add_python_test(access)
@@ -36,6 +35,7 @@ if(RUN_CORE_TESTS)
   add_python_test(hash_state)
   add_python_test(install)
   add_python_test(item)
+  add_python_test(logging_config)
   add_python_test(mail)
   add_python_test(model)
   add_python_test(routetable)
@@ -51,6 +51,8 @@ if(RUN_CORE_TESTS)
   add_python_test(stream BIND_SERVER TIMEOUT 90)
   add_python_test(system)
   add_python_test(token)
+  # Upload test uses mongo replicaset and a lot of resources, so we run it by itself
+  add_python_test(upload RUN_SERIAL REQUIRED_FILES "${MONGOD_EXECUTABLE}")
   add_python_test(user)
   add_python_test(webroot)
   add_python_test(path_utilities)
@@ -65,6 +67,7 @@ if(RUN_CORE_TESTS)
   add_web_client_test(admin "${PROJECT_SOURCE_DIR}/clients/web/test/spec/adminSpec.js" ASSETSTORE s3 WEBSECURITY false
     PLUGIN_DIR "${PROJECT_SOURCE_DIR}/tests/test_plugins")
   add_web_client_test(collection "${PROJECT_SOURCE_DIR}/clients/web/test/spec/collectionSpec.js")
+  add_web_client_test(collection_base_class "${PROJECT_SOURCE_DIR}/clients/web/test/spec/collectionBaseClassSpec.js")
   add_web_client_test(group "${PROJECT_SOURCE_DIR}/clients/web/test/spec/groupSpec.js")
   add_web_client_test(user "${PROJECT_SOURCE_DIR}/clients/web/test/spec/userSpec.js")
   add_web_client_test(item "${PROJECT_SOURCE_DIR}/clients/web/test/spec/itemSpec.js")

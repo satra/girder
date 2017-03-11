@@ -232,6 +232,8 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
                 msg += ' Response body was:\n%s' % json.dumps(
                     response.json, sort_keys=True, indent=4,
                     separators=(',', ': '))
+            else:
+                msg += 'Response body was:\n%s' % self.getBody(response)
 
             self.fail(msg)
 
@@ -310,8 +312,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         :param param: The name of the missing parameter.
         :type param: str
         """
-        self.assertEqual("Parameter '%s' is required." % param,
-                         response.json.get('message', ''))
+        self.assertEqual('Parameter "%s" is required.' % param, response.json.get('message', ''))
         self.assertStatus(response, 400)
 
     def getSseMessages(self, resp):
@@ -366,8 +367,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
 
         return self.model('file').load(file['_id'], force=True)
 
-    def ensureRequiredParams(self, path='/', method='GET', required=(),
-                             user=None):
+    def ensureRequiredParams(self, path='/', method='GET', required=(), user=None):
         """
         Ensure that a set of parameters is required by the endpoint.
 
@@ -378,8 +378,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         """
         for exclude in required:
             params = dict.fromkeys([p for p in required if p != exclude], '')
-            resp = self.request(path=path, method=method, params=params,
-                                user=user)
+            resp = self.request(path=path, method=method, params=params, user=user)
             self.assertMissingParameter(resp, exclude)
 
     def _genToken(self, user):
@@ -439,29 +438,33 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         :type appPrefix: str
         :returns: The cherrypy response object from the request.
         """
-        if not params:
-            params = {}
-
         headers = [('Host', '127.0.0.1'), ('Accept', 'application/json')]
         qs = fd = None
 
         if additionalHeaders:
             headers.extend(additionalHeaders)
-        if method in ['POST', 'PUT', 'PATCH'] or body:
-            if isinstance(body, six.string_types):
-                body = body.encode('utf8')
-            qs = urllib.parse.urlencode(params).encode('utf8')
-            if type is None:
-                headers.append(('Content-Type',
-                                'application/x-www-form-urlencoded'))
-            else:
-                headers.append(('Content-Type', type))
-                qs = body
-            headers.append(('Content-Length', '%d' % len(qs)))
-            fd = BytesIO(qs)
-            qs = None
-        elif params:
+
+        if isinstance(body, six.text_type):
+            body = body.encode('utf8')
+
+        if params:
             qs = urllib.parse.urlencode(params)
+
+        if params and body:
+            # In this case, we are forced to send params in query string
+            fd = BytesIO(body)
+            headers.append(('Content-Type', type))
+            headers.append(('Content-Length', '%d' % len(body)))
+        elif method in ['POST', 'PUT', 'PATCH'] or body:
+            if type:
+                qs = body
+            elif params:
+                qs = qs.encode('utf8')
+
+            headers.append(('Content-Type', type or 'application/x-www-form-urlencoded'))
+            headers.append(('Content-Length', '%d' % len(qs or b'')))
+            fd = BytesIO(qs or b'')
+            qs = None
 
         app = cherrypy.tree.apps[appPrefix]
         request, response = app.get_serving(

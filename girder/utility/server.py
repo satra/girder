@@ -18,15 +18,27 @@
 ###############################################################################
 
 import cherrypy
+import mako
 import mimetypes
 import os
 import six
 
 import girder.events
-from girder import constants, logprint
+from girder import constants, logprint, __version__
 from girder.utility import plugin_utilities, model_importer
 from girder.utility import config
 from . import webroot
+
+with open(os.path.join(os.path.dirname(__file__), 'error.mako')) as f:
+    _errorTemplate = f.read()
+
+
+def _errorDefault(status, message, *args, **kwargs):
+    """
+    This is used to render error pages outside of the normal Girder app, such as
+    404's. This overrides the default cherrypy error pages.
+    """
+    return mako.template.Template(_errorTemplate).render(status=status, message=message)
 
 
 def configureServer(test=False, plugins=None, curConfig=None):
@@ -50,7 +62,9 @@ def configureServer(test=False, plugins=None, curConfig=None):
         '/': {
             'request.dispatch': cherrypy.dispatch.MethodDispatcher(),
             'request.show_tracebacks': test,
-            'request.methods_with_bodies': ('POST', 'PUT', 'PATCH')
+            'request.methods_with_bodies': ('POST', 'PUT', 'PATCH'),
+            'response.headers.server': 'Girder %s' % __version__,
+            'error_page.default': _errorDefault
         }
     }
     # Add MIME types for serving Fontello files from staticdir;
@@ -118,9 +132,17 @@ def configureServer(test=False, plugins=None, curConfig=None):
         'plugins': plugins
     })
 
+    # Make the staticRoot relative to the api_root, if possible.  The api_root
+    # could be relative or absolute, but it needs to be in an absolute form for
+    # relpath to behave as expected.  We always expect the api_root to
+    # contain at least two components, but the reference from static needs to
+    # be from only the first component.
+    apiRootBase = os.path.split(os.path.join('/', curConfig['server']['api_root']))[0]
+
     root.api.v1.updateHtmlVars({
         'apiRoot': curConfig['server']['api_root'],
-        'staticRoot': routeTable[constants.GIRDER_STATIC_ROUTE_ID],
+        'staticRoot': os.path.relpath(routeTable[constants.GIRDER_STATIC_ROUTE_ID],
+                                      apiRootBase)
     })
 
     root, appconf, _ = plugin_utilities.loadPlugins(
@@ -193,11 +215,14 @@ def setup(test=False, plugins=None, curConfig=None):
                                       str(routeTable[constants.GIRDER_ROUTE_ID]), appconf)
 
     # Mount static files
-    cherrypy.tree.mount(BaseWebroot(), routeTable[constants.GIRDER_STATIC_ROUTE_ID],
+    cherrypy.tree.mount(None, routeTable[constants.GIRDER_STATIC_ROUTE_ID],
                         {'/':
                          {'tools.staticdir.on': True,
                           'tools.staticdir.dir': os.path.join(constants.STATIC_ROOT_DIR,
-                                                              'clients/web/static')}})
+                                                              'clients/web/static'),
+                          'request.show_tracebacks': appconf['/']['request.show_tracebacks'],
+                          'response.headers.server': 'Girder %s' % __version__,
+                          'error_page.default': _errorDefault}})
 
     # Mount API (special case)
     # The API is always mounted at /api AND at api relative to the Girder root
@@ -212,10 +237,6 @@ def setup(test=False, plugins=None, curConfig=None):
         application.merge({'server': {'mode': 'testing'}})
 
     return application
-
-
-class BaseWebroot(object):
-    exposed = True
 
 
 class _StaticFileRoute(object):

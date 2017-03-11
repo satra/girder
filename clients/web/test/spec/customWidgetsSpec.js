@@ -29,7 +29,7 @@
             runs(function () {
                 var _user = new girder.models.UserModel({
                     login: 'mylogin',
-                    password:'mypassword',
+                    password: 'mypassword',
                     email: 'email@email.com',
                     firstName: 'First',
                     lastName: 'Last'
@@ -141,7 +141,7 @@
 
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     checkboxes: false,
@@ -168,7 +168,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     downloadLinks: false,
@@ -194,7 +194,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     viewLinks: false,
@@ -220,7 +220,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     downloadLinks: false,
@@ -252,7 +252,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     showMetadata: false,
@@ -278,7 +278,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.HierarchyWidget({
+                return new girder.views.widgets.HierarchyWidget({
                     el: 'body',
                     parentModel: folder,
                     showSizes: false,
@@ -299,6 +299,73 @@
                 expect($('.g-list-checkbox').length).toBe(2);
                 expect($('.g-select-all').length).toBe(0);
                 expect($('.g-item-size').length).toBe(0);
+            });
+
+            var folderSelected = false;
+            runs(function () {
+                $('body').empty().off();
+
+                return new girder.views.widgets.HierarchyWidget({
+                    el: 'body',
+                    parentModel: folder,
+                    checkboxes: false,
+                    parentView: null,
+                    showItems: false,
+                    onFolderSelect: function (parent) { folderSelected = true; }
+                });
+            });
+
+            waitsFor(function () {
+                return $('.g-hierarchy-widget').length > 0 &&
+                       $('.g-folder-list-link').length > 0;
+            }, 'the hierarchy widget to display with the folder select button');
+
+            runs(function () {
+                expect($('.g-upload-here-button').length).toBe(1);
+                expect($('.g-hierarchy-actions-header').length).toBe(1);
+                expect($('.g-list-checkbox').length).toBe(0);
+                expect($('.g-select-all').length).toBe(0);
+                expect($('.g-checked-actions-buttons').length).toBe(0);
+                expect($('.g-folder-list-link').text()).toBe('subfolder');
+                expect($('.g-item-list-link').length).toBe(0);
+                expect($('button.g-select-folder').length).toBe(1);
+
+                $('button.g-select-folder').click();
+            });
+
+            waitsFor(
+              function () { return folderSelected; },
+              'the folder select button to be clicked');
+
+            runs(function () {
+                $('body').empty().off();
+
+                return new girder.views.widgets.HierarchyWidget({
+                    el: 'body',
+                    parentModel: folder,
+                    checkboxes: false,
+                    parentView: null,
+                    showItems: false
+                });
+            });
+
+            waitsFor(
+              function () {
+                  return $('.g-hierarchy-widget').length > 0 &&
+                         $('.g-folder-list-link').length > 0;
+              },
+              'the hierarchy widget to display without the folder select button'
+            );
+
+            runs(function () {
+                expect($('.g-upload-here-button').length).toBe(1);
+                expect($('.g-hierarchy-actions-header').length).toBe(1);
+                expect($('.g-list-checkbox').length).toBe(0);
+                expect($('.g-select-all').length).toBe(0);
+                expect($('.g-checked-actions-buttons').length).toBe(0);
+                expect($('.g-folder-list-link').text()).toBe('subfolder');
+                expect($('.g-item-list-link').length).toBe(0);
+                expect($('button.g-select-folder').length).toBe(0);
             });
         });
     });
@@ -334,7 +401,7 @@
             runs(function () {
                 $('body').empty().off();
 
-                new girder.views.widgets.AccessWidget({
+                return new girder.views.widgets.AccessWidget({
                     el: 'body',
                     modal: false,
                     model: folder,
@@ -537,6 +604,32 @@
                 expect(openCheckbox.is(':disabled')).toBe(false);
             });
         });
+
+        it('test hide component options', function () {
+            runs(function () {
+                // create the widget will all hide options
+                widget.destroy();
+                widget = new girder.views.widgets.AccessWidget({
+                    el: 'body',
+                    modal: false,
+                    model: folder,
+                    modelType: 'folder',
+                    parentView: null,
+                    hideRecurseOption: true,
+                    hideSaveButton: true,
+                    hidePrivacyEditor: true,
+                    hideAccessType: true,
+                    noAccessFlag: true
+                });
+            });
+
+            waitsFor(function () {
+                return widget.$('#g-ac-list-users').children().length === 1 &&
+                    widget.$('.g-public-container').length === 0 &&
+                    widget.$('.g-recursive-container').length === 0 &&
+                    widget.$('.g-user-access-entry select').length === 0;
+            }, 'check if all component are hidden');
+        });
     });
 
     describe('Test search widget with non-standard options', function () {
@@ -622,7 +715,7 @@
         it('test editing custom field with custom callbacks', function () {
             var widget;
             var model = new girder.models.FolderModel({
-                customMeta: {},
+                customMeta: {}
             });
             var addCbCalled = false;
             var editCbCalled = false;

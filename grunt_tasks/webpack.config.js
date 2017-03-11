@@ -19,13 +19,13 @@
  * the DllPlugin for dynamic loading, each individual bundle has its own config options
  * that can extend these.
  */
+var path = require('path');
 var webpack = require('webpack');
 
 var ExtractTextPlugin = require('extract-text-webpack-plugin');
 
 var paths = require('./webpack.paths.js');
 var es2015Preset = require.resolve('babel-preset-es2015');
-var istanbulPlugin = require.resolve('babel-plugin-istanbul');
 
 function fileLoader() {
     return {
@@ -50,8 +50,24 @@ function urlLoader(options) {
     return loader;
 }
 
-var loaderPaths = [/clients\/web\/src/];
-var loaderPathsNodeModules = loaderPaths.concat([/node_modules/]);
+function _coverageConfig() {
+    try {
+        var istanbulPlugin = require.resolve('babel-plugin-istanbul');
+        return {
+            plugins: [[
+                istanbulPlugin, {
+                    exclude: ['**/*.pug', '**/*.jade', 'node_modules/**/*']
+                }
+            ]]
+        };
+    } catch (e) {
+        // We won't have the istanbul plugin installed in a prod env.
+        return {};
+    }
+}
+
+var loaderPaths = [path.resolve('clients', 'web', 'src')];
+var loaderPathsNodeModules = loaderPaths.concat([path.resolve('node_modules')]);
 
 module.exports = {
     output: {
@@ -65,11 +81,6 @@ module.exports = {
             jQuery: 'jquery',
             $: 'jquery',
             'window.jQuery': 'jquery'
-        }),
-        new ExtractTextPlugin({
-            filename: '[name].min.css',
-            allChunks: true,
-            disable: false
         })
     ],
     module: {
@@ -83,45 +94,33 @@ module.exports = {
                 query: {
                     presets: [es2015Preset],
                     env: {
-                        cover: {
-                            plugins: [[
-                                istanbulPlugin, {
-                                    exclude: ['**/*.pug', '**/*.jade', 'node_modules/**/*']
-                                }
-                            ]]
-                        }
+                        cover: _coverageConfig()
                     }
                 }
             },
             // JSON files
             {
                 test: /\.json$/,
-                include: loaderPaths,
+                include: loaderPaths.concat(loaderPathsNodeModules),
                 loader: 'json-loader'
             },
             // Stylus
             {
                 test: /\.styl$/,
                 include: loaderPaths,
-                loaders: [
-                    ExtractTextPlugin.extract('style-loader'),
-                    'css-loader',
-                    {
-                        loader: 'stylus-loader',
-                        query: {
-                            'resolve url': true
-                        }
-                    }
-                ]
+                loaders: ExtractTextPlugin.extract({
+                    fallbackLoader: 'style-loader',
+                    // stylus loader query must be a string for now
+                    loader: ['css-loader', 'stylus-loader?resolve url=true']
+                })
             },
             // CSS
             {
                 test: /\.css$/,
                 include: loaderPathsNodeModules,
-                loaders: [
-                    ExtractTextPlugin.extract('style-loader'),
-                    'css-loader'
-                ]
+                loaders: ExtractTextPlugin.extract({
+                    fallbackLoader: 'style-loader',
+                    loader: ['css-loader']})
             },
             // Pug
             {
@@ -189,26 +188,17 @@ module.exports = {
                     fileLoader()
                 ]
             }
-        ],
-        noParse: [
-            // Avoid warning:
-            //   This seems to be a pre-built javascript file. Though this is
-            //   possible, it's not recommended. Try to require the original source
-            //   to get better results.
-            // This needs fixing later, as Webpack works better when provided with source.
-            // /node_modules\/pug/,
-            // /node_modules\/remarkable/
         ]
     },
     resolve: {
         alias: {
             'girder': paths.web_src
         },
+        extensions: ['.js'],
         modules: [
-            paths.clients_web,
-            paths.plugins,
             paths.node_modules
-        ]
+        ],
+        symlinks: false
     },
     node: {
         canvas: 'empty',

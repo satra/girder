@@ -81,7 +81,7 @@ function _testDirectAdd(policy, curUser, curSetting) {
             curUser = 'admin';
         }
         runs(function () {
-            var resp = girder.rest.restRequest({
+            girder.rest.restRequest({
                 path: 'system/setting',
                 type: 'PUT',
                 data: {
@@ -136,7 +136,7 @@ function _testDirectAdd(policy, curUser, curSetting) {
                    $('.g-group-mods>li').length === 1 &&
                    $('.g-group-admins>li').length === 2;
         }, 'the group page to load');
-     }
+    }
     /* If the invite search field exists or we think it should,
      * test that the add button exists as we expect */
     if (policy.mayAdd === null) {
@@ -150,7 +150,6 @@ function _testDirectAdd(policy, curUser, curSetting) {
 }
 
 describe('Test group actions', function () {
-
     it('register a user (first is admin)',
         girderTest.createUser('admin',
                               'admin@email.com',
@@ -211,7 +210,7 @@ describe('Test group actions', function () {
         girderTest.waitForLoad();
     });
 
-    it('have the admin remove and then force add himself to the group', function () {
+    it('have the admin remove and then force add themself to the group', function () {
         runs(function () {
             $('.g-group-admin-remove').click();
         });
@@ -222,7 +221,7 @@ describe('Test group actions', function () {
             return $('#g-confirm-button').text() === 'Yes';
         }, 'the confirmation button to appear');
 
-        // Admin user removes himself from the group
+        // Admin user removes themself from the group
         runs(function () {
             $('#g-confirm-button').click();
         });

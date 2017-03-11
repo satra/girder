@@ -54,6 +54,7 @@ class InstallWithOptions(install):
                     os.path.join(dest, 'clients', 'web', 'src', 'assets'))
         self.mergeDir('grunt_tasks', dest)
         self.mergeDir('plugins', dest)
+        self.mergeDir('scripts', dest)
 
 with open('README.rst') as f:
     readme = f.read()
@@ -62,6 +63,7 @@ install_reqs = [
     'bcrypt',
     'boto',
     'CherryPy<8',  # see https://github.com/girder/girder/issues/1615
+    'jsonschema',
     'Mako',
     'pymongo>=3',
     'PyYAML',
@@ -74,10 +76,11 @@ install_reqs = [
 
 extras_reqs = {
     'celery_jobs': ['celery'],
+    'dicom_viewer': ['pydicom'],
     'geospatial': ['geojson'],
+    'item_tasks': ['ctk-cli'],
     'thumbnails': ['Pillow', 'pydicom', 'numpy'],
-    'worker': ['celery'],
-    'oauth': ['pyjwt', 'cryptography']
+    'worker': ['celery']
 }
 all_extra_reqs = itertools.chain.from_iterable(extras_reqs.values())
 extras_reqs['plugins'] = list(set(all_extra_reqs))
@@ -137,7 +140,7 @@ setup(
             'conf/girder.dist.cfg',
             'mail_templates/*.mako',
             'mail_templates/**/*.mako',
-            'utility/webroot.mako',
+            'utility/*.mako',
             'api/api_docs.mako'
         ]
     },

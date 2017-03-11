@@ -29,11 +29,11 @@ our example, we'll just use JSON. ::
 
     touch cats/plugin.json
 
-The plugin config file should specify a human-readable name and description for your
-plugin, and can optionally contain a list of other plugins that your plugin
-depends on. If your plugin has dependencies, the other plugins will be
-enabled whenever your plugin is enabled. The contents of plugin.json for our
-example will be:
+The plugin config file should specify a human-readable name and description for 
+your plugin. It can also optionally contain a URL to documentation and 
+a list of other plugins that your plugin depends on. If your plugin has 
+dependencies, the other plugins will be enabled whenever your plugin is enabled. 
+The contents of plugin.json for our example will be:
 
 .. note:: If you have both ``plugin.json`` and ``plugin.yml`` files in the directory, the
    ``plugin.json`` will take precedence.
@@ -41,11 +41,18 @@ example will be:
 .. code-block:: json
 
     {
-    "name": "My Cats Plugin",
-    "description": "Allows users to manage their cats.",
-    "version": "1.0.0",
-    "dependencies": ["other_plugin"]
+        "name": "My Cats Plugin",
+        "description": "Allows users to manage their cats.",
+        "url": "http://girder.readthedocs.io/en/latest/plugin/mycat.html",
+        "version": "1.0.0",
+        "dependencies": ["other_plugin"]
     }
+
+.. note:: Some plugins depend on other plugins, but only for building web client code, not
+    at runtime. For these cases, rather than the ``dependencies`` field, use the
+    ``staticWebDependencies`` field instead. This will allow the plugin to import web
+    code from the other plugin, but will not require the other plugin to be built or enabled
+    at runtime.
 
 This information will appear in the web client administration console, and
 administrators will be able to enable and disable it there. Whenever plugins
@@ -93,7 +100,9 @@ Adding a new route to the web API
 
 If you want to add a new route to an existing core resource type, just call the
 ``route()`` function on the existing resource type. For example, to add a
-route for ``GET /item/:id/cat`` to the system, ::
+route for ``GET /item/:id/cat`` to the system,
+
+.. code-block:: python
 
     from girder.api import access
     from girder.api.rest import boundHandler
@@ -129,34 +138,70 @@ will default to being restricted to administrators.
 When you start the server, you may notice a warning message appears:
 ``WARNING: No description docs present for route GET item/:id/cat``. You
 can add self-describing API documentation to your route using the
-``describeRoute`` decorator and ``Description`` class as in the following
-example: ::
+``autoDescribeRoute`` decorator and :py:class:`girder.api.describe.Description` class as in the following
+example:
 
-    from girder.api.describe import Description, describeRoute
+.. code-block:: python
+
+    from girder.api.describe import Description, autoDescribeRoute
     from girder.api import access
 
     @access.public
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Retrieve the cat for a given item.')
         .param('id', 'The item ID', paramType='path')
         .param('cat', 'The cat value.', required=False)
         .errorResponse())
-    def myHandler(id, params):
+    def myHandler(id, cat, params):
         return {
            'itemId': id,
-           'cat': params.get('cat', 'No cat param passed')
+           'cat': cat
         }
-
 
 That will make your route automatically appear in the Swagger documentation
 and will allow users to interact with it via that UI. See the
 :ref:`RESTful API docs<restapi>` for more information about the Swagger page.
+In addition, the ``autoDescribeRoute`` decorator handles a lot of the validation
+and type coercion for you, with the benefit of ensuring that the documentation of
+the endpoint inputs matches their actual behavior. Documented parameters will be
+sent to the method as kwargs (so the order you declare them in the header doesn't matter).
+Any additional parameters that were passed but not listed in the ``Description`` object
+will be contained in the ``params`` kwarg as a dictionary. The validation of required
+parameters, coercion to the correct data type, and setting default values is all
+handled automatically for you based on the parameter descriptions in the ``Description``
+object passed. Two special methods of the ``Description`` object can be used for
+additional behavior control: :py:func:`girder.api.describe.Description.modelParam` and
+:py:func:`girder.api.describe.Description.jsonParam`.
+
+The ``modelParam`` method is used to convert parameters passed in as IDs to the model document
+corresponding to those IDs, and also can perform access checks to ensure that the user calling the
+endpoint has the requisite access level on the resource. For example, we can convert the above
+handler to use it:
+
+.. code-block:: python
+
+    @access.public
+    @autoDescribeRoute(
+        Description('Retrieve the cat for a given item.')
+        .modelParam('id', 'The item ID', model='item', level=AccessType.READ)
+        .param('cat', 'The cat value.', required=False)
+        .errorResponse())
+    def myHandler(item, cat, params):
+        return {
+           'item': item,
+           'cat': cat
+        }
+
+The ``jsonParam`` method can be used to indicate that a parameter should be parsed as
+a JSON string into the corresponding python value and passed as such.
 
 If you are creating routes that you explicitly do not wish to be exposed in the
-Swagger documentation for whatever reason, you can pass ``None`` to the
-``describeRoute`` decorator, and no warning will appear. ::
+Swagger documentation for whatever reason, you can pass ``hide=True`` to the
+``autoDescribeRoute`` decorator, and no warning will appear.
 
-    @describeRoute(None)
+.. code-block:: python
+
+    @autoDescribeRoute(Description(...), hide=True)
 
 Adding a new resource type to the web API
 *****************************************
@@ -164,7 +209,9 @@ Adding a new resource type to the web API
 Perhaps for our use case we determine that ``cat`` should be its own resource
 type rather than being referenced via the ``item`` resource. If we wish to add
 a new resource type entirely, it will look much like one of the core resource
-classes, and we can add it to the API in the ``load()`` method. ::
+classes, and we can add it to the API in the ``load()`` method.
+
+.. code-block:: python
 
     from girder.api.rest import Resource
 
@@ -223,24 +270,28 @@ can call ``requireAccessFlags``, e.g.:
 .. code-block:: python
 
     @access.user
-    @loadmodel(model='cat', plugin='cats', level=AccessType.WRITE)
+    @autoDescribeRoute(
+        Description('Feed a cat')
+        .modelParam('id', 'ID of the cat', model='cat', plugin='cats', level=AccessType.WRITE)
+    )
     def feedCats(self, cat, params):
-        item = self.model('cat', 'cats').getItemFromCat(cat)
-
-        self.model('item').requireAccessFlags(item, user=getCurrentUser(), flags='cats.feed')
+        self.model('cat').requireAccessFlags(item, user=getCurrentUser(), flags='cats.feed')
 
         # Feed the cats ...
 
 That will throw an ``AccessException`` if the user does not possess the specified access
-flag(s) on the given resource. You can equivalently use ``loadmodel`` as a decorator:
+flag(s) on the given resource. You can equivalently use the ``Description.modelParam``
+method using ``autoDescribeRoute``, passing a ``requiredFlags`` parameter, e.g.:
 
 .. code-block:: python
 
     @access.user
-    @loadmodel(model='cat', plugin='cats', level=AccessType.WRITE, requiredFlags='cats.feed')
+    @autoDescribeRoute(
+        Description('Feed a cat')
+        .modelParam('id', 'ID of the cat', model='cat', plugin='cats', level=AccessType.WRITE,
+                    requiredFlags='cats.feed')
+    )
     def feedCats(self, cat, params):
-        item = self.model('cat', 'cats').getItemFromCat(cat)
-
         # Feed the cats ...
 
 Normally, anyone with ownership access on the resource will be allowed to enable the flag on
@@ -265,7 +316,9 @@ they wish.
 In the most general sense, the events framework is simply a way of binding
 arbitrary events with handlers. The events are identified by a unique string
 that can be used to bind handlers to them. For example, if the following logic
-is executed by your plugin at startup time, ::
+is executed by your plugin at startup time,
+
+.. code-block:: python
 
     from girder import events
 
@@ -274,7 +327,9 @@ is executed by your plugin at startup time, ::
 
     events.bind('some_event', 'my_handler', handler)
 
-And then during runtime the following code executes: ::
+And then during runtime the following code executes:
+
+.. code-block:: python
 
     events.trigger('some_event', info='hello')
 
@@ -508,6 +563,25 @@ above, the value of this property is ``web_client/main.js``):
         }
     }
 
+You may also set ``main`` to an object that maps bundle names to entry points, which is
+helpful for plugins that want to build multiple targets using the same loaders. For example:
+
+.. code-block:: json
+
+    {
+        "name": "MY_PLUGIN",
+        "webpack": {
+            "main": {
+                "plugin": "web_client/main.js",
+                "external": "web_external/main.js"
+            }
+        }
+    }
+
+That will cause both ``plugin.min.*`` and ``external.min.*`` files to appear in the
+built directory. The file paths of the entry points should be specified relative to the
+plugin directory.
+
 Customizing the Webpack Build
 *****************************
 
@@ -523,6 +597,8 @@ to build your plugin.
 The hash passed to the helper function contains the following information:
 
 - ``plugin``: the name of the plugin
+- ``output``: the name of the output bundle, which is "plugin" by default.
+- ``main``: the full path to the entry point file for the bundle.
 - ``pluginEntry``: the webpack entry point for the plugin (e.g.
   ``plugins/MY_PLUGIN/plugin``)
 - ``pluginDir``: the full path to the plugin directory
@@ -653,6 +729,18 @@ Each type needs to be installed differently due to how node manages external pac
   isolated. By default, the ``localNodeModules`` is set to ``false`` and the
   dependencies will be installed to Girder's own ``node_modules`` directory.
 
+  The final alternative for Webpack-built plugins is to set the ``npm.install``
+  configuration property to ``true``; this will cause the build system to run
+  ``npm install`` in the plugin directory. This may have certain benefits for
+  plugin development, such as allowing plugin sources to import modules without
+  the alias prefix as described above (though, this alias would still be
+  available for use by other plugins that want to access your plugin's
+  dependencies). Additionally, if your plugin is installed without using
+  symlinks, then you will still have access to Girder's Node dependencies (see
+  this [GitHub conversation](https://github.com/nodejs/node/issues/3402) for a
+  discussion of why symlinked directories will not allow for the usual Node
+  import semantics).
+
   If instead you are using a custom Grunt build with a Gruntfile, the
   dependencies should be installed into your plugin's **node_modules** directory
   by providing a `package.json <https://docs.npmjs.com/files/package.json>`_
@@ -699,6 +787,9 @@ To create an "external" plugin, simply change the output name to any other
 value. One reasonable choice is ``index``. These plugins can be used to create
 wholly independent web clients that don't explicitly depend on the core Girder
 client being loaded.
+
+.. note:: If you use an object to specify an output to entry point mapping in ``webpack.main``,
+          the ``webpack.output`` value will be ignored if specified.
 
 Executing custom Grunt build steps for your plugin
 **************************************************

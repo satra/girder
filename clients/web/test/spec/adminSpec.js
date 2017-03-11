@@ -1,5 +1,3 @@
-/* globals girderTest, runs, waitsFor, expect, describe, it, beforeEach, spyOn */
-
 /**
  * Start the girder backbone app.
  */
@@ -41,6 +39,11 @@ describe('Create an admin and non-admin user', function () {
     it('No admin console when logging in as a normal user', function () {
         expect($('.g-global-nav-li span').text()).not.toContain('Admin console');
     });
+
+    it('go to groups page', girderTest.goToGroupsPage());
+
+    it('Create a public group',
+       girderTest.createGroup('pubGroup', 'public group', true));
 });
 
 describe('Test the settings page', function () {
@@ -101,21 +104,65 @@ describe('Test the settings page', function () {
     });
     it('Use search to update collection create policy', function () {
         runs(function () {
+            $('.g-collection-create-policy-container .g-plugin-switch').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container .g-grant-access-container').length > 0;
+        }, 'access widget to load');
+
+        runs(function () {
             $('.g-collection-create-policy-container .g-search-field').val('admin')
                 .trigger('input');
         });
 
         waitsFor(function () {
             return $('.g-collection-create-policy-container .g-search-result').length > 0;
-        }, 'search result to appear');
+        }, 'search result to appear for a user');
 
         runs(function () {
             $('.g-collection-create-policy-container .g-search-result>a').click();
         });
 
         waitsFor(function () {
-            return JSON.parse($('#g-core-collection-create-policy').val()).users.length === 1;
-        }, 'policy value to update');
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users').children().length === 1;
+        }, 'access list to populate with one user');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-search-field').val('pubGroup').trigger('input');
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .g-search-result .icon-users').length > 0;
+        }, 'search result to appear for a group');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-search-result>a').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-groups').children().length === 1;
+        }, 'access list to populate with one group');
+
+        runs(function () {
+            $('.g-submit-settings').click();
+        });
+
+        runs(function () {
+            $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users .g-user-access-entry .icon-cancel').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users').children().length === 0;
+        }, 'policy value to be cleared');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-plugin-switch').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container .g-grant-access-container').length === 0;
+        }, 'access widget unload');
     });
 
     it('logout and check for redirect to front page from settings page', function () {
@@ -493,20 +540,20 @@ describe('Test the assetstore page', function () {
     }, _testFilesystemImport);
 
     _testAssetstore('gridfs', 'g-create-gridfs-tab',
-                    {'g-new-gridfs-name': 'name',
-                     'g-new-gridfs-db': 'girder_webclient_gridfs'});
+        {'g-new-gridfs-name': 'name',
+            'g-new-gridfs-db': 'girder_webclient_gridfs'});
 
     /* The specified assetstore should NOT exist, and the specified mongohost
      * should NOT be present (nothing should respond on those ports). */
     _testAssetstore('gridfs-rs', 'g-create-gridfs-tab',
-                    {'g-new-gridfs-name': 'name',
-                     'g-new-gridfs-db': 'girder_webclient_gridfsrs',
-                     'g-new-gridfs-mongohost': 'mongodb://127.0.0.2:27080,' +
+        {'g-new-gridfs-name': 'name',
+            'g-new-gridfs-db': 'girder_webclient_gridfsrs',
+            'g-new-gridfs-mongohost': 'mongodb://127.0.0.2:27080,' +
                         '127.0.0.2:27081,127.0.0.2:27082',
-                     'g-new-gridfs-replicaset': 'replicaset'}, null, function () {
-                         return $('.g-validation-failed-message:contains(' +
+            'g-new-gridfs-replicaset': 'replicaset'}, null, function () {
+                return $('.g-validation-failed-message:contains(' +
                               '"Could not connect to the database: ")').length === 1;
-                     }, 'validation failure to display', true);
+            }, 'validation failure to display', true);
 
     _testAssetstore('s3', 'g-create-s3-tab', {
         'g-new-s3-name': 'name',

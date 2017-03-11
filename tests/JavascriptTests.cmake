@@ -25,12 +25,12 @@ function(javascript_tests_init)
 endfunction()
 
 function(add_eslint_test name input)
-  if (NOT BUILD_JAVASCRIPT_TESTS)
+  if (NOT JAVASCRIPT_STYLE_TESTS)
     return()
   endif()
 
   if (NOT ESLINT_EXECUTABLE)
-    message(FATAL_ERROR "CMake variable ESLINT_EXECUTABLE is not set. Run 'npm install' or disable BUILD_JAVASCRIPT_TESTS.")
+    message(FATAL_ERROR "CMake variable ESLINT_EXECUTABLE is not set. Run 'npm install' or disable JAVASCRIPT_STYLE_TESTS.")
   endif()
 
   set(_args ESLINT_IGNORE_FILE ESLINT_CONFIG_FILE)
@@ -53,16 +53,16 @@ function(add_eslint_test name input)
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     COMMAND "${ESLINT_EXECUTABLE}" --ignore-path "${ignore_file}" --config "${config_file}" "${input}"
   )
-  set_property(TEST "eslint_${name}" PROPERTY LABELS girder_browser girder_static_analysis)
+  set_property(TEST "eslint_${name}" PROPERTY LABELS girder_static_analysis)
 endfunction()
 
 function(add_puglint_test name path)
-  if (NOT BUILD_JAVASCRIPT_TESTS)
+  if (NOT JAVASCRIPT_STYLE_TESTS)
     return()
   endif()
 
   if (NOT PUGLINT_EXECUTABLE)
-    message(FATAL_ERROR "CMake variable PUGLINT_EXECUTABLE is not set. Run 'npm install' or disable BUILD_JAVASCRIPT_TESTS.")
+    message(FATAL_ERROR "CMake variable PUGLINT_EXECUTABLE is not set. Run 'npm install' or disable JAVASCRIPT_STYLE_TESTS.")
   endif()
 
   add_test(
@@ -70,7 +70,7 @@ function(add_puglint_test name path)
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     COMMAND "${PUGLINT_EXECUTABLE}" -c "${PROJECT_SOURCE_DIR}/.pug-lintrc" "${path}"
   )
-  set_property(TEST "eslint_${name}" PROPERTY LABELS girder_browser girder_static_analysis)
+  set_property(TEST "puglint_${name}" PROPERTY LABELS girder_static_analysis)
 endfunction()
 
 function(add_web_client_test case specFile)
@@ -95,6 +95,8 @@ function(add_web_client_test case specFile)
   # BASEURL (url): The base url to load for the test.
   # TEST_MODULE (python module path): Run this module rather than the default
   #     "tests.web_client_test"
+  # SETUP_MODULES: colon-separated list of python scripts to import at test setup time
+  #     for side effects such as mocking, adding API routes, etc.
   # REQUIRED_FILES: A list of files required to run the test.
   if (NOT BUILD_JAVASCRIPT_TESTS)
     return()
@@ -103,7 +105,8 @@ function(add_web_client_test case specFile)
   set(testname "web_client_${case}")
 
   set(_options NOCOVERAGE)
-  set(_args PLUGIN ASSETSTORE WEBSECURITY BASEURL PLUGIN_DIR TIMEOUT TEST_MODULE REQUIRED_FILES)
+  set(_args PLUGIN ASSETSTORE WEBSECURITY BASEURL PLUGIN_DIR TIMEOUT TEST_MODULE REQUIRED_FILES
+            SETUP_MODULES)
   set(_multival_args RESOURCE_LOCKS ENABLEDPLUGINS)
   cmake_parse_arguments(fn "${_options}" "${_args}" "${_multival_args}" ${ARGN})
 
@@ -174,6 +177,12 @@ function(add_web_client_test case specFile)
 
   if(fn_RESOURCE_LOCKS)
     set_property(TEST ${testname} PROPERTY RESOURCE_LOCK ${fn_RESOURCE_LOCKS})
+  endif()
+
+  if(fn_SETUP_MODULES)
+    set_property(TEST ${testname} APPEND PROPERTY ENVIRONMENT
+        "SETUP_MODULES=${fn_SETUP_MODULES}"
+    )
   endif()
 
   if(fn_TIMEOUT)

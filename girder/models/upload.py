@@ -22,9 +22,11 @@ import six
 from bson.objectid import ObjectId
 
 from girder import events
+from girder.api import rest
 from girder.constants import SettingKey
 from girder.utility import assetstore_utilities
 from .model_base import Model, GirderException, ValidationException
+from girder.utility.progress import noProgress
 
 
 class Upload(Model):
@@ -114,16 +116,26 @@ class Upload(Model):
 
         return doc
 
-    def handleChunk(self, upload, chunk):
+    def handleChunk(self, upload, chunk, filter=False, user=None):
         """
         When a chunk is uploaded, this should be called to process the chunk.
         If this is the final chunk of the upload, this method will finalize
         the upload automatically.
 
+        This method will return EITHER an upload or a file document. If this
+        is the final chunk of the upload, the upload is finalized and the created
+        file document is returned. Otherwise, it returns the upload document
+        with the relevant fields modified.
+
         :param upload: The upload document to update.
         :type upload: dict
         :param chunk: The file object representing the chunk that was uploaded.
         :type chunk: file
+        :param filter: Whether the model should be filtered. Only affects
+            behavior when returning a file model, not the upload model.
+        :type filter: bool
+        :param user: The current user. Only affects behavior if filter=True.
+        :type user: dict or None
         """
         assetstore = self.model('assetstore').load(upload['assetstoreId'])
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
@@ -132,7 +144,11 @@ class Upload(Model):
 
         # If upload is finished, we finalize it
         if upload['received'] == upload['size']:
-            return self.finalizeUpload(upload, assetstore)
+            file = self.finalizeUpload(upload, assetstore)
+            if filter:
+                return self.model('file').filter(file, user=user)
+            else:
+                return file
         else:
             return upload
 
@@ -177,6 +193,10 @@ class Upload(Model):
             file['created'] = datetime.datetime.utcnow()
             file['assetstoreId'] = assetstore['_id']
             file['size'] = upload['size']
+            # If the file was previously imported, it is no longer.
+            if file.get('imported'):
+                file['imported'] = False
+
         else:  # Creating a new file record
             if upload.get('attachParent'):
                 item = None
@@ -212,7 +232,9 @@ class Upload(Model):
         # Add an async event for handlers that wish to process this file.
         eventParams = {
             'file': file,
-            'assetstore': assetstore
+            'assetstore': assetstore,
+            'currentToken': rest.getCurrentToken(),
+            'currentUser': rest.getCurrentUser()
         }
         if 'reference' in upload:
             eventParams['reference'] = upload['reference']
@@ -349,7 +371,7 @@ class Upload(Model):
         upload = adapter.initUpload(upload)
         return self.save(upload)
 
-    def moveFileToAssetstore(self, file, user, assetstore):
+    def moveFileToAssetstore(self, file, user, assetstore, progress=noProgress):
         """
         Move a file from whatever assetstore it is located in to a different
         assetstore.  This is done by downloading and re-uploading the file.
@@ -357,6 +379,7 @@ class Upload(Model):
         :param file: the file to move.
         :param user: the user that is authorizing the move.
         :param assetstore: the destination assetstore.
+        :param progress: optional progress context.
         :returns: the original file if it is not moved, or the newly 'uploaded'
             file if it is.
         """
@@ -386,9 +409,13 @@ class Upload(Model):
                 chunk = data
             if len(chunk) >= chunkSize:
                 upload = self.handleChunk(upload, six.BytesIO(chunk))
+                progress.update(increment=len(chunk))
                 chunk = None
+
         if chunk is not None:
             upload = self.handleChunk(upload, six.BytesIO(chunk))
+            progress.update(increment=len(chunk))
+
         return upload
 
     def list(self, limit=0, offset=0, sort=None, filters=None):
