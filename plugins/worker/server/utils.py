@@ -17,8 +17,22 @@
 #  limitations under the License.
 ###############################################################################
 
+from .constants import PluginSettings
 from girder.api.rest import getApiUrl
-from girder.utility.model_importer import ModelImporter
+from girder.models.file import File
+from girder.models.setting import Setting
+from girder.plugins.jobs.models.job import Job
+
+
+def getWorkerApiUrl():
+    """
+    Return the API base URL to which the worker should callback to
+    write output information back to the server. This is controlled
+    via a system setting, and the default is to use the core server
+    root setting.
+    """
+    apiUrl = Setting().get(PluginSettings.API_URL)
+    return apiUrl or getApiUrl()
 
 
 def girderInputSpec(resource, resourceType='file', name=None, token=None,
@@ -49,9 +63,9 @@ def girderInputSpec(resource, resourceType='file', name=None, token=None,
     if isinstance(token, dict):
         token = token['_id']
 
-    return {
+    result = {
         'mode': 'girder',
-        'api_url': getApiUrl(),
+        'api_url': getWorkerApiUrl(),
         'token': token,
         'id': str(resource['_id']),
         'name': name or resource['name'],
@@ -60,6 +74,15 @@ def girderInputSpec(resource, resourceType='file', name=None, token=None,
         'format': dataFormat,
         'fetch_parent': fetchParent
     }
+
+    if resourceType == 'file' and not fetchParent and Setting().get(PluginSettings.DIRECT_PATH):
+        # If we are adding a file and it exists on the local filesystem include
+        # that location.  This can permit the user of the specification to
+        # access the file directly instead of downloading the file.
+        adapter = File().getAssetstoreAdapter(resource)
+        if callable(getattr(adapter, 'fullPath', None)):
+            result['direct_path'] = adapter.fullPath(resource)
+    return result
 
 
 def girderOutputSpec(parent, token, parentType='folder', name=None,
@@ -85,7 +108,8 @@ def girderOutputSpec(parent, token, parentType='folder', name=None,
     :type dataFormat: str
     :param reference: Optional "reference" string to pass back to the server
         during the upload. This can be used to attach arbitrary data to this
-        for tracking purposes, e.g., referring back to related inputs.
+        for tracking purposes, e.g., referring back to related inputs. Bind to
+        the "data.process" event to hook into the upload and inspect references.
     :type reference: str
     """
     if isinstance(token, dict):
@@ -93,7 +117,7 @@ def girderOutputSpec(parent, token, parentType='folder', name=None,
 
     return {
         'mode': 'girder',
-        'api_url': getApiUrl(),
+        'api_url': getWorkerApiUrl(),
         'token': token,
         'name': name,
         'parent_id': str(parent['_id']),
@@ -116,14 +140,14 @@ def jobInfoSpec(job, token=None, logPrint=True):
     :param logPrint: Whether standard output from the job should be
     """
     if token is None:
-        token = ModelImporter.model('job', 'jobs').createJobToken(job)
+        token = Job().createJobToken(job)
 
     if isinstance(token, dict):
         token = token['_id']
 
     return {
         'method': 'PUT',
-        'url': '/'.join((getApiUrl(), 'job', str(job['_id']))),
+        'url': '/'.join((getWorkerApiUrl(), 'job', str(job['_id']))),
         'reference': str(job['_id']),
         'headers': {'Girder-Token': token},
         'logPrint': logPrint

@@ -17,14 +17,12 @@
 #  limitations under the License.
 ###############################################################################
 
-import json
-
-from ..describe import Description, describeRoute
-from ..rest import Resource, RestException, filtermodel, loadmodel, \
-    setResponseHeader
+from ..describe import Description, autoDescribeRoute
+from ..rest import Resource, filtermodel, setResponseHeader, setContentDisposition
 from girder.api import access
 from girder.constants import AccessType, TokenScope
-from girder.models.model_base import AccessException
+from girder.models.collection import Collection as CollectionModel
+from girder.exceptions import AccessException
 from girder.utility import ziputil
 from girder.utility.progress import ProgressContext
 
@@ -34,6 +32,8 @@ class Collection(Resource):
     def __init__(self):
         super(Collection, self).__init__()
         self.resourceName = 'collection'
+        self._model = CollectionModel()
+
         self.route('DELETE', (':id',), self.deleteCollection)
         self.route('GET', (), self.find)
         self.route('GET', (':id',), self.getCollection)
@@ -45,135 +45,110 @@ class Collection(Resource):
         self.route('PUT', (':id', 'access'), self.updateCollectionAccess)
 
     @access.public(scope=TokenScope.DATA_READ)
-    @filtermodel(model='collection')
-    @describeRoute(
+    @filtermodel(model=CollectionModel)
+    @autoDescribeRoute(
         Description('List or search for collections.')
         .responseClass('Collection', array=True)
-        .param('text', "Pass this to perform a text search for collections.",
-               required=False)
+        .param('text', 'Pass this to perform a text search for collections.', required=False)
         .pagingParams(defaultSort='name')
     )
-    def find(self, params):
+    def find(self, text, limit, offset, sort):
         user = self.getCurrentUser()
-        limit, offset, sort = self.getPagingParameters(params, 'name')
 
-        if 'text' in params:
-            return list(self.model('collection').textSearch(
-                params['text'], user=user, limit=limit, offset=offset))
+        if text is not None:
+            return list(self._model.textSearch(text, user=user, limit=limit, offset=offset))
 
-        return list(self.model('collection').list(
-            user=user, offset=offset, limit=limit, sort=sort))
+        return list(self._model.list(user=user, offset=offset, limit=limit, sort=sort))
 
     @access.user(scope=TokenScope.DATA_WRITE)
-    @filtermodel(model='collection')
-    @describeRoute(
+    @filtermodel(model=CollectionModel)
+    @autoDescribeRoute(
         Description('Create a new collection.')
         .responseClass('Collection')
         .param('name', 'Name for the collection. Must be unique.')
         .param('description', 'Collection description.', required=False)
         .param('public', 'Whether the collection should be publicly visible.',
-               dataType='boolean', default=False)
+               required=False, dataType='boolean', default=False)
         .errorResponse()
         .errorResponse('You are not authorized to create collections.', 403)
     )
-    def createCollection(self, params):
-        self.requireParams('name', params)
-
+    def createCollection(self, name, description, public):
         user = self.getCurrentUser()
 
-        if not self.model('collection').hasCreatePrivilege(user):
-            raise AccessException(
-                'You are not authorized to create collections.')
+        if not self._model.hasCreatePrivilege(user):
+            raise AccessException('You are not authorized to create collections.')
 
-        public = self.boolParam('public', params, default=False)
-
-        return self.model('collection').createCollection(
-            name=params['name'], description=params.get('description'),
-            public=public, creator=user)
+        return self._model.createCollection(
+            name=name, description=description, public=public, creator=user)
 
     @access.public(scope=TokenScope.DATA_READ)
-    @loadmodel(model='collection', level=AccessType.READ)
-    @filtermodel(model='collection')
-    @describeRoute(
+    @filtermodel(model=CollectionModel)
+    @autoDescribeRoute(
         Description('Get a collection by ID.')
         .responseClass('Collection')
-        .param('id', 'The ID of the collection.', paramType='path')
+        .modelParam('id', model=CollectionModel, level=AccessType.READ)
         .errorResponse('ID was invalid.')
         .errorResponse('Read permission denied on the collection.', 403)
     )
-    def getCollection(self, collection, params):
+    def getCollection(self, collection):
         return collection
 
     @access.public(scope=TokenScope.DATA_READ)
-    @loadmodel(model='collection', level=AccessType.READ)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Get detailed information about a collection.')
-        .param('id', 'The ID of the collection.', paramType='path')
+        .modelParam('id', model=CollectionModel, level=AccessType.READ)
         .errorResponse()
         .errorResponse('Read access was denied on the collection.', 403)
     )
-    def getCollectionDetails(self, collection, params):
+    def getCollectionDetails(self, collection):
         return {
-            'nFolders': self.model('collection').countFolders(
+            'nFolders': self._model.countFolders(
                 collection, user=self.getCurrentUser(), level=AccessType.READ)
         }
 
     @access.cookie
     @access.public(scope=TokenScope.DATA_READ)
-    @loadmodel(model='collection', level=AccessType.READ)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Download an entire collection as a zip archive.')
-        .param('id', 'The ID of the collection.', paramType='path')
-        .param('mimeFilter', 'JSON list of MIME types to include.',
-               required=False)
+        .modelParam('id', model=CollectionModel, level=AccessType.READ)
+        .jsonParam('mimeFilter', 'JSON list of MIME types to include.', requireArray=True,
+                   required=False)
+        .produces('application/zip')
         .errorResponse('ID was invalid.')
         .errorResponse('Read access was denied for the collection.', 403)
     )
-    def downloadCollection(self, collection, params):
+    def downloadCollection(self, collection, mimeFilter):
         setResponseHeader('Content-Type', 'application/zip')
-        setResponseHeader(
-            'Content-Disposition',
-            'attachment; filename="%s%s"' % (collection['name'], '.zip'))
-
-        user = self.getCurrentUser()
-        mimeFilter = params.get('mimeFilter')
-        if mimeFilter:
-            try:
-                mimeFilter = json.loads(mimeFilter)
-                if not isinstance(mimeFilter, list):
-                    raise ValueError()
-            except ValueError:
-                raise RestException('The mimeFilter must be a JSON list.')
+        setContentDisposition(collection['name'] + '.zip')
 
         def stream():
             zip = ziputil.ZipGenerator(collection['name'])
-            for (path, file) in self.model('collection').fileList(
-                    collection, user=user, subpath=False,
-                    mimeFilter=mimeFilter):
+            for (path, file) in self._model.fileList(
+                    collection, user=self.getCurrentUser(), subpath=False, mimeFilter=mimeFilter):
                 for data in zip.addFile(file, path):
                     yield data
             yield zip.footer()
         return stream
 
     @access.user(scope=TokenScope.DATA_OWN)
-    @loadmodel(model='collection', level=AccessType.ADMIN)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Get the access control list for a collection.')
-        .param('id', 'The ID of the collection.', paramType='path')
+        .modelParam('id', model=CollectionModel, level=AccessType.ADMIN)
         .errorResponse('ID was invalid.')
         .errorResponse('Admin permission denied on the collection.', 403)
     )
-    def getCollectionAccess(self, collection, params):
-        return self.model('collection').getFullAccessList(collection)
+    def getCollectionAccess(self, collection):
+        return self._model.getFullAccessList(collection)
 
     @access.user(scope=TokenScope.DATA_OWN)
-    @loadmodel(model='collection', level=AccessType.ADMIN)
-    @filtermodel(model='collection', addFields={'access'})
-    @describeRoute(
+    @filtermodel(model=CollectionModel, addFields={'access'})
+    @autoDescribeRoute(
         Description('Set the access control list for a collection.')
-        .param('id', 'The ID of the collection.', paramType='path')
-        .param('access', 'The access control list as JSON.')
-        .param('public', "Whether the collection should be publicly visible.",
+        .modelParam('id', model=CollectionModel, level=AccessType.ADMIN)
+        .jsonParam('access', 'The access control list as JSON.', requireObject=True)
+        .jsonParam('publicFlags', 'List of public access flags to set on the collection.',
+                   required=False, requireArray=True)
+        .param('public', 'Whether the collection should be publicly visible.',
                dataType='boolean', required=False)
         .param('recurse', 'Whether the policies should be applied to all '
                'folders under this collection as well.', dataType='boolean',
@@ -184,54 +159,45 @@ class Collection(Resource):
         .errorResponse('ID was invalid.')
         .errorResponse('Admin permission denied on the collection.', 403)
     )
-    def updateCollectionAccess(self, collection, params):
-        self.requireParams('access', params)
+    def updateCollectionAccess(self, collection, access, public, recurse, progress, publicFlags):
         user = self.getCurrentUser()
-
-        public = self.boolParam('public', params)
-        recurse = self.boolParam('recurse', params, default=False)
-        progress = self.boolParam('progress', params, default=False) and recurse
-
-        access = self.getParamJson('access', params, default={})
-        publicFlags = self.getParamJson('publicFlags', params, default=None)
+        progress = progress and recurse
 
         with ProgressContext(progress, user=user, title='Updating permissions',
                              message='Calculating progress...') as ctx:
             if progress:
-                ctx.update(total=self.model('collection').subtreeCount(
-                    collection, includeItems=False, user=user,
-                    level=AccessType.ADMIN))
-            return self.model('collection').setAccessList(
+                ctx.update(total=self._model.subtreeCount(
+                    collection, includeItems=False, user=user, level=AccessType.ADMIN))
+            return self._model.setAccessList(
                 collection, access, save=True, user=user, recurse=recurse,
                 progress=ctx, setPublic=public, publicFlags=publicFlags)
 
     @access.user(scope=TokenScope.DATA_READ)
-    @loadmodel(model='collection', level=AccessType.WRITE)
-    @filtermodel(model='collection')
-    @describeRoute(
+    @filtermodel(model=CollectionModel)
+    @autoDescribeRoute(
         Description('Edit a collection by ID.')
         .responseClass('Collection')
-        .param('id', 'The ID of the collection.', paramType='path')
-        .param('name', 'Unique name for the collection.', required=False)
-        .param('description', 'Collection description.', required=False)
+        .modelParam('id', model=CollectionModel, level=AccessType.WRITE)
+        .param('name', 'Unique name for the collection.', required=False, strip=True)
+        .param('description', 'Collection description.', required=False, strip=True)
         .errorResponse('ID was invalid.')
         .errorResponse('Write permission denied on the collection.', 403)
     )
-    def updateCollection(self, collection, params):
-        collection['name'] = params.get('name', collection['name']).strip()
-        collection['description'] = params.get(
-            'description', collection['description']).strip()
+    def updateCollection(self, collection, name, description):
+        if name is not None:
+            collection['name'] = name
+        if description is not None:
+            collection['description'] = description
 
-        return self.model('collection').updateCollection(collection)
+        return self._model.updateCollection(collection)
 
     @access.user(scope=TokenScope.DATA_OWN)
-    @loadmodel(model='collection', level=AccessType.ADMIN)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Delete a collection by ID.')
-        .param('id', 'The ID of the collection.', paramType='path')
+        .modelParam('id', model=CollectionModel, level=AccessType.ADMIN)
         .errorResponse('ID was invalid.')
         .errorResponse('Admin permission denied on the collection.', 403)
     )
-    def deleteCollection(self, collection, params):
-        self.model('collection').remove(collection)
+    def deleteCollection(self, collection):
+        self._model.remove(collection)
         return {'message': 'Deleted collection %s.' % collection['name']}

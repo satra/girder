@@ -20,7 +20,6 @@ import 'girder/stylesheets/body/assetstores.styl';
 import 'as-jqplot/dist/jquery.jqplot.js';
 import 'as-jqplot/dist/jquery.jqplot.css'; // jquery.jqplot.min.css
 import 'as-jqplot/dist/plugins/jqplot.pieRenderer.js';
-import 'bootstrap/js/tooltip';
 
 /**
  * This private data structure is a dynamic way to map assetstore types to the views
@@ -44,6 +43,7 @@ var AssetstoresView = View.extend({
 
     initialize: function (settings) {
         cancelRestRequests('fetch');
+        this.plots = [];
         this.assetstoreEdit = settings.assetstoreEdit || false;
         this.importableTypes = [
             AssetstoreType.FILESYSTEM,
@@ -61,11 +61,24 @@ var AssetstoresView = View.extend({
         }, this).fetch();
     },
 
+    destroy: function () {
+        this._destroyPlots();
+        View.prototype.destroy.call(this);
+    },
+
+    _destroyPlots: function () {
+        for (let plot of this.plots) {
+            plot.data('jqplot').destroy();
+        }
+        this.plots = [];
+    },
+
     render: function () {
         if (!getCurrentUser() || !getCurrentUser().get('admin')) {
             this.$el.text('Must be logged in as admin to view this page.');
             return;
         }
+        this._destroyPlots();
         this.$el.html(AssetstoresTemplate({
             assetstores: this.collection.toArray(),
             types: AssetstoreType,
@@ -74,7 +87,6 @@ var AssetstoresView = View.extend({
         }));
 
         this.newAssetstoreWidget.setElement(this.$('#g-new-assetstore-container')).render();
-        this.$('.g-assetstore-button-container[title]').tooltip();
 
         _.each(this.$('.g-assetstore-capacity-chart'),
             this.capacityChart, this);
@@ -104,7 +116,7 @@ var AssetstoresView = View.extend({
             ['Used (' + formatSize(used) + ')', used],
             ['Free (' + formatSize(capacity.free) + ')', capacity.free]
         ];
-        $(el).jqplot([data], {
+        var plot = $(el).jqplot([data], {
             seriesDefaults: {
                 renderer: $.jqplot.PieRenderer,
                 rendererOptions: {
@@ -130,6 +142,7 @@ var AssetstoresView = View.extend({
             },
             gridPadding: {top: 10, right: 10, bottom: 10, left: 10}
         });
+        this.plots.push(plot);
     },
 
     setCurrentAssetstore: function (evt) {
@@ -163,7 +176,7 @@ var AssetstoresView = View.extend({
                   'stored in it, and no data will be lost.',
             escapedHtml: true,
             yesText: 'Delete',
-            confirmCallback: _.bind(function () {
+            confirmCallback: () => {
                 assetstore.on('g:deleted', function () {
                     events.trigger('g:alert', {
                         icon: 'ok',
@@ -180,7 +193,7 @@ var AssetstoresView = View.extend({
                         timeout: 4000
                     });
                 }, this).destroy();
-            }, this)
+            }
         });
     },
 
@@ -219,4 +232,3 @@ var AssetstoresView = View.extend({
 });
 
 export default AssetstoresView;
-

@@ -11,9 +11,10 @@ import 'girder/utilities/jquery/girderModal';
 var CollectionInfoWidget = View.extend({
     initialize: function () {
         this.needToFetch = !this.model.has('nFolders');
-        if (this.needToFetch) {
+        if (this.needToFetch || this.timestamp !== this.model.get('updated')) {
             this.model.once('g:fetched.details', function () {
                 this.needToFetch = false;
+                this.timestamp = this.model.get('updated');
                 this.render();
             }, this).fetch({extraPath: 'details'});
         }
@@ -31,6 +32,8 @@ var CollectionInfoWidget = View.extend({
             DATE_SECOND: DATE_SECOND,
             renderMarkdown: renderMarkdown
         })).girderModal(this);
+
+        return this;
     }
 });
 

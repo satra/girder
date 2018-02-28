@@ -1,5 +1,27 @@
 .g-body-title System configuration
 form.g-settings-form(role="form")
+  .g-settings-form-container
+    h4 Instance Branding
+    .form-group
+      label(for="g-core-brand-name") Brand Name
+      input#g-core-brand-name.form-control.input-sm(
+          type="text", value=settings['core.brand_name'] || '',
+          placeholder=`Default: ${defaults['core.brand_name'] || 'none'}`,
+          title="The brand name of the application.")
+    .form-group
+      label(for="g-core-contact-email-address") Contact email address
+      input#g-core-contact-email-address.form-control.input-sm(
+          type="text", value=settings['core.contact_email_address'] || '',
+          placeholder=`Default: ${defaults['core.contact_email_address'] || 'none'}`,
+          title="The contact email address for users to obtain support with this instance.")
+    .form-group
+      label(for="g-core-banner-color") Banner Color
+      #g-core-banner-color-container
+        input#g-core-banner-color.form-control.input-sm(
+            type="color", value=settings['core.banner_color'] || defaults['core.banner_color'],
+            title="The banner color of the application.")
+        button#g-core-banner-default-color.form-control.input-sm(
+            type="button", title="Default color") default
   .form-group
     label(for="g-core-cookie-lifetime") Cookie duration (days)
     input#g-core-cookie-lifetime.form-control.input-sm(
@@ -55,11 +77,15 @@ form.g-settings-form(role="form")
             selected=((settings['core.add_to_group_policy'] ||
           defaults['core.add_to_group_policy']) === "yesmod"))
           | Yes, by group administrators and moderators unless disabled per group
-    .g-collection-create-policy-container.g-settings-form-container
-      label(for="g-core-collection-create-policy") Collection creation policy
-      textarea#g-core-collection-create-policy.form-control
-        = JSON.stringify(settings['core.collection_create_policy'] || defaults['core.collection_create_policy'], null, 4)
-      .g-search-container
+    .g-collection-create-policy-container
+      label Collection creation policy
+      p.
+        Allow additional users and groups to create collection.
+      input.g-plugin-switch(type="checkbox",
+          checked="checked", data-size="mini", data-on-color="primary")
+      .access-widget-container
+      textarea#g-core-collection-create-policy.hide
+        = JSON.stringify(settings['core.collection_create_policy'] || defaults['core.collection_create_policy'])
     .form-group
       label(for="g-core-user-default-folders") Create default folders for new users
       select#g-core-user-default-folders.form-control.input-sm
@@ -69,6 +95,20 @@ form.g-settings-form(role="form")
         option(value="public_private",
             selected=((settings['core.user_default_folders'] ||
           defaults['core.user_default_folders']) === "public_private")) Yes, "Public" and "Private"
+    .form-group
+      .checkbox
+        label(for="g-core-api-keys")
+          input#g-core-api-keys(
+              type="checkbox", checked=(
+                settings['core.api_keys'] === null ? defaults['core.api_keys'] : settings['core.api_keys']))
+          | Enable API keys
+    .form-group
+      .checkbox
+        label(for="g-core-enable-password-login")
+          input#g-core-enable-password-login(
+              type="checkbox", checked=(
+                settings['core.enable_password_login'] === null ? defaults['core.enable_password_login'] : settings['core.enable_password_login']))
+          | Enable password login
   .g-settings-form-container
     h4 Email Creation
     .form-group
@@ -149,7 +189,7 @@ form.g-settings-form(role="form")
               value=routes[name] || '',
               data-webroot-name=name,
               title="The path to place ${name}.")
-  .panel-group#g-configuration-accordion
+  #g-configuration-accordion.panel-group
     .panel.panel-default
       .panel-heading(data-toggle="collapse",
           data-parent="#g-configuration-accordion",
@@ -160,6 +200,11 @@ form.g-settings-form(role="form")
       #g-advanced-settings-tab.panel-collapse.collapse
         .panel-body
           p These settings should only be changed if you are certain of what you are doing.
+          .form-group
+            label(for="g-core-server-root") Server root URL
+            input#g-core-server-root.form-control.input-sm(
+                type="text", value=settings['core.server_root'] || '',
+                placeholder='Detect automatically')
           .form-group
             label(for="g-core-upload-minimum-chunk-size") Upload minimum chunk size (bytes)
             br

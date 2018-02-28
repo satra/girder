@@ -27,12 +27,11 @@ import requests
 import six
 
 from girder.constants import SettingKey
+from girder.exceptions import ValidationException
+from girder.models.setting import Setting
+from girder.models.token import Token
+from girder.models.user import User
 from tests import base
-
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
-import jwt
-from jwt.utils import base64url_encode
 
 
 def setUpModule():
@@ -53,7 +52,7 @@ class OauthTest(base.TestCase):
         global PluginSettings
         from girder.plugins.oauth.constants import PluginSettings
 
-        self.adminUser = self.model('user').createUser(
+        self.adminUser = User().createUser(
             email='rocky@phila.pa.us',
             login='rocky',
             firstName='Robert',
@@ -86,7 +85,7 @@ class OauthTest(base.TestCase):
         self.assertEqual(login, 'rocky1')
 
     def _testSettings(self, providerInfo):
-        self.model('setting').set(SettingKey.REGISTRATION_POLICY, 'closed')
+        Setting().set(SettingKey.REGISTRATION_POLICY, 'closed')
         self.accountType = 'new'
 
         # We should get an empty listing when no providers are set up
@@ -139,6 +138,48 @@ class OauthTest(base.TestCase):
         # No need to re-fetch and test all of these settings values; they will
         # be implicitly tested later
 
+    def _testOauthTokenAsParam(self, providerInfo):
+        self.accountType = 'existing'
+
+        def _getCallbackParams(providerInfo, redirect):
+            resp = self.request('/oauth/provider', params={
+                'redirect': redirect,
+                'list': True
+            })
+            self.assertStatusOk(resp)
+            providerResp = resp.json[0]
+            resp = requests.get(providerResp['url'], allow_redirects=False)
+            self.assertEqual(resp.status_code, 302)
+            callbackLoc = urllib.parse.urlparse(resp.headers['location'])
+            self.assertEqual(
+                callbackLoc.path, r'/api/v1/oauth/%s/callback' % providerInfo['id'])
+            callbackLocQuery = urllib.parse.parse_qs(callbackLoc.query)
+            self.assertNotHasKeys(callbackLocQuery, ('error',))
+            callbackParams = {
+                key: val[0] for key, val in six.viewitems(callbackLocQuery)
+            }
+            return callbackParams
+
+        redirect = 'http://localhost/#foo/bar?token={girderToken}'
+        params = _getCallbackParams(providerInfo, redirect)
+
+        resp = self.request(
+            '/oauth/%s/callback' % providerInfo['id'], params=params, isJson=False)
+        self.assertStatus(resp, 303)
+        self.assertTrue('girderToken' in resp.cookie)
+        self.assertEqual(
+            resp.headers['Location'],
+            redirect.format(girderToken=resp.cookie['girderToken'].value))
+
+        redirect = 'http://localhost/#foo/bar?token={foobar}'
+        params = _getCallbackParams(providerInfo, redirect)
+
+        resp = self.request(
+            '/oauth/%s/callback' % providerInfo['id'], params=params, isJson=False)
+        self.assertStatus(resp, 303)
+        self.assertTrue('girderToken' in resp.cookie)
+        self.assertEqual(resp.headers['Location'], redirect)
+
     def _testOauth(self, providerInfo):
         # Close registration to start off, and simulate a new user
         self._testSettings(providerInfo)
@@ -170,7 +211,7 @@ class OauthTest(base.TestCase):
             redirectParams = urllib.parse.parse_qs(
                 urllib.parse.urlparse(providerResp['url']).query)
             csrfTokenParts = redirectParams['state'][0].partition('.')
-            token = self.model('token').load(csrfTokenParts[0], force=True, objectId=False)
+            token = Token().load(csrfTokenParts[0], force=True, objectId=False)
             self.assertLess(
                 token['expires'],
                 datetime.datetime.utcnow() + datetime.timedelta(days=0.30))
@@ -225,10 +266,9 @@ class OauthTest(base.TestCase):
 
         # Try callback, with expired CSRF token
         params = getCallbackParams(getProviderResp())
-        token = self.model('token').load(
-            params['state'].partition('.')[0], force=True, objectId=False)
+        token = Token().load(params['state'].partition('.')[0], force=True, objectId=False)
         token['expires'] -= datetime.timedelta(days=1)
-        self.model('token').save(token)
+        Token().save(token)
         resp = self.request('/oauth/%s/callback' % providerInfo['id'], params=params)
         self.assertStatus(resp, 403)
         self.assertTrue(resp.json['message'].startswith('Expired CSRF token'))
@@ -280,8 +320,12 @@ class OauthTest(base.TestCase):
         # Try callback for the 'existing' account, which should succeed
         existing = doOauthLogin('existing')
 
-        # Try callback for the 'new' account, with open registration
-        self.model('setting').set(SettingKey.REGISTRATION_POLICY, 'open')
+        # Hit validation exception on ignore registration policy setting
+        with self.assertRaises(ValidationException):
+            Setting().set(PluginSettings.IGNORE_REGISTRATION_POLICY, 'foo')
+
+        # Try callback for the 'new' account, with registration policy ignored
+        Setting().set(PluginSettings.IGNORE_REGISTRATION_POLICY, True)
         new = doOauthLogin('new')
 
         # Password login for 'new' OAuth-only user should fail gracefully
@@ -306,7 +350,7 @@ class OauthTest(base.TestCase):
         linkParts = link.split('/')
         userId = linkParts[-3]
         tokenId = linkParts[-1]
-        tempToken = self.model('token').load(tokenId, force=True, objectId=False)
+        tempToken = Token().load(tokenId, force=True, objectId=False)
         resp = self.request(
             '/user/password/temporary/' + userId, method='GET', params={'token': tokenId})
         self.assertStatusOk(resp)
@@ -319,7 +363,7 @@ class OauthTest(base.TestCase):
             })
         self.assertStatusOk(resp)
         # The temp token should get deleted on password change
-        token = self.model('token').load(tempToken, force=True, objectId=False)
+        token = Token().load(tempToken, force=True, objectId=False)
         self.assertEqual(token, None)
 
         # Password login for 'new' OAuth-only user should now succeed
@@ -380,6 +424,10 @@ class OauthTest(base.TestCase):
             }
         }
 
+        # Test inclusion of custom scope
+        from girder.plugins.oauth.providers.google import Google
+        Google.addScopes(['custom_scope', 'foo'])
+
         @httmock.urlmatch(scheme='https', netloc='^accounts.google.com$',
                           path='^/o/oauth2/auth$', method='GET')
         def mockGoogleRedirect(url, request):
@@ -387,7 +435,7 @@ class OauthTest(base.TestCase):
                 params = urllib.parse.parse_qs(url.query)
                 self.assertEqual(params['response_type'], ['code'])
                 self.assertEqual(params['access_type'], ['online'])
-                self.assertEqual(params['scope'], ['profile email'])
+                self.assertEqual(params['scope'], ['profile email custom_scope foo'])
             except (KeyError, AssertionError) as e:
                 return {
                     'status_code': 400,
@@ -757,6 +805,7 @@ class OauthTest(base.TestCase):
                 'existing': {
                     'auth_code': 'globus_existing_auth_code',
                     'access_token': 'globus_existing_test_token',
+                    'id_token': 'globus_exisiting_id_token',
                     'user': {
                         'login': self.adminUser['login'],
                         'email': self.adminUser['email'],
@@ -771,6 +820,7 @@ class OauthTest(base.TestCase):
                 'new': {
                     'auth_code': 'globus_new_auth_code',
                     'access_token': 'globus_new_test_token',
+                    'id_token': 'globus_new_id_token',
                     'user': {
                         'login': 'metaphor',
                         'email': 'metaphor@labs.ussr.gov',
@@ -784,20 +834,6 @@ class OauthTest(base.TestCase):
                 }
             }
         }
-
-        rsa_test_key = rsa.generate_private_key(65537, key_size=2048, backend=default_backend())
-
-        for key in list(providerInfo['accounts'].keys()):
-            account = providerInfo['accounts'][key]
-            id_token_data = {
-                'sub': account['user']['oauth']['id'],
-                'aud': providerInfo['client_id']['value'],
-                'email': account['user']['email'],
-                'name': ' '.join((account['user']['firstName'],
-                                  account['user']['lastName'])),
-            }
-            providerInfo['accounts'][key]['id_token'] = \
-                jwt.encode(id_token_data, rsa_test_key, algorithm='RS512').decode('utf8')
 
         @httmock.urlmatch(scheme='https', netloc='^auth.globus.org$',
                           path='^/v2/oauth2/authorize$', method='GET')
@@ -847,24 +883,29 @@ class OauthTest(base.TestCase):
             }
 
         @httmock.urlmatch(scheme='https', netloc='^auth.globus.org$',
-                          path='^/jwk.json$', method='GET')
-        def mockGlobusRSAKey(url, request):
-            n = rsa_test_key.public_key().public_numbers().n
-            e = rsa_test_key.public_key().public_numbers().e
-            if hasattr(int, 'to_bytes'):
-                bytes_to_int = int.to_bytes
-            else:
-                def bytes_to_int(n, length, endianess='big'):
-                    h = '%x' % n
-                    s = ('0'*(len(h) % 2) + h).zfill(length*2).decode('hex')
-                    return s if endianess == 'big' else s[::-1]
-
-            n = base64url_encode(bytes_to_int(n, 256, 'big')).decode('utf8')
-            e = base64url_encode(bytes_to_int(e, 3, 'big')).decode('utf8')
-            return {
-                'status_code': 200,
-                'content': json.dumps({'keys': [dict(n=n, e=e)]})
-            }
+                          path='^/v2/oauth2/userinfo$', method='GET')
+        def mockGlobusUserInfo(url, request):
+            try:
+                for account in six.viewvalues(providerInfo['accounts']):
+                    if 'Bearer %s' % account['access_token'] == \
+                            request.headers['Authorization']:
+                        break
+                else:
+                    self.fail()
+            except AssertionError as e:
+                return {
+                    'status_code': 401,
+                    'content': json.dumps({
+                        'message': repr(e)
+                    })
+                }
+            user = account['user']
+            return json.dumps({
+                'email': user['email'],
+                'preferred_username': user['email'],
+                'sub': user['oauth']['id'],
+                'name': '{firstName} {lastName}'.format(**user),
+            })
 
         @httmock.urlmatch(scheme='https', netloc='^auth.globus.org$',
                           path='^/v2/oauth2/token$', method='POST')
@@ -916,12 +957,13 @@ class OauthTest(base.TestCase):
 
         with httmock.HTTMock(
             mockGlobusRedirect,
-            mockGlobusRSAKey,
+            mockGlobusUserInfo,
             mockGlobusToken,
             # Must keep 'mockOtherRequest' last
             self.mockOtherRequest
         ):
             self._testOauth(providerInfo)
+            self._testOauthTokenAsParam(providerInfo)
 
     def testLinkedinOauth(self):  # noqa
         providerInfo = {
@@ -1291,6 +1333,162 @@ class OauthTest(base.TestCase):
             mockBitbucketToken,
             mockBitbucketApiUser,
             mockBitbucketApiEmail,
+            # Must keep 'mockOtherRequest' last
+            self.mockOtherRequest
+        ):
+            self._testOauth(providerInfo)
+
+    def testBoxOauth(self):  # noqa
+        providerInfo = {
+            'id': 'box',
+            'name': 'Box',
+            'client_id': {
+                'key': PluginSettings.BOX_CLIENT_ID,
+                'value': 'box_test_client_id'
+            },
+            'client_secret': {
+                'key': PluginSettings.BOX_CLIENT_SECRET,
+                'value': 'box_test_client_secret'
+            },
+            'allowed_callback_re':
+                r'^http://127\.0\.0\.1(?::\d+)?/api/v1/oauth/box/callback$',
+            'url_re': r'^https://account\.box\.com/api/oauth2/authorize',
+            'accounts': {
+                'existing': {
+                    'auth_code': 'box_existing_auth_code',
+                    'access_token': 'box_existing_test_token',
+                    'user': {
+                        'login': self.adminUser['login'],
+                        'email': self.adminUser['email'],
+                        'firstName': self.adminUser['firstName'],
+                        'lastName': self.adminUser['lastName'],
+                        'oauth': {
+                            'provider': 'box',
+                            'id': '2481632'
+                        }
+                    }
+                },
+                'new': {
+                    'auth_code': 'box_new_auth_code',
+                    'access_token': 'box_new_test_token',
+                    'user': {
+                        # this login is not provided by Box, but will be
+                        # created internally by _deriveLogin
+                        'login': 'metaphor',
+                        'email': 'metaphor@labs.ussr.gov',
+                        'firstName': 'Ivan',
+                        'lastName': 'Drago',
+                        'oauth': {
+                            'provider': 'box',
+                            'id': '1985'
+                        }
+                    }
+                }
+            }
+        }
+
+        @httmock.urlmatch(scheme='https', netloc='^account.box.com$',
+                          path='^/api/oauth2/authorize$', method='GET')
+        def mockBoxRedirect(url, request):
+            redirectUri = None
+            try:
+                params = urllib.parse.parse_qs(url.query)
+                # Check redirect_uri first, so other errors can still redirect
+                redirectUri = params['redirect_uri'][0]
+                self.assertEqual(params['client_id'], [providerInfo['client_id']['value']])
+            except (KeyError, AssertionError) as e:
+                return {
+                    'status_code': 404,
+                    'content': json.dumps({
+                        'error': repr(e)
+                    })
+                }
+            try:
+                six.assertRegex(self, redirectUri, providerInfo['allowed_callback_re'])
+                state = params['state'][0]
+                # Nothing to test for state, since provider doesn't care
+            except (KeyError, AssertionError) as e:
+                returnQuery = urllib.parse.urlencode({
+                    'error': repr(e),
+                })
+            else:
+                returnQuery = urllib.parse.urlencode({
+                    'state': state,
+                    'code': providerInfo['accounts'][self.accountType]['auth_code']
+                })
+            return {
+                'status_code': 302,
+                'headers': {
+                    'Location': '%s?%s' % (redirectUri, returnQuery)
+                }
+            }
+
+        @httmock.urlmatch(scheme='https', netloc='^api.box.com$',
+                          path='^/oauth2/token$', method='POST')
+        def mockBoxToken(url, request):
+            try:
+                self.assertEqual(request.headers['Accept'], 'application/json')
+                params = urllib.parse.parse_qs(request.body)
+                self.assertEqual(params['client_id'], [providerInfo['client_id']['value']])
+            except (KeyError, AssertionError) as e:
+                return {
+                    'status_code': 404,
+                    'content': json.dumps({
+                        'error': repr(e)
+                    })
+                }
+            try:
+                for account in six.viewvalues(providerInfo['accounts']):
+                    if account['auth_code'] == params['code'][0]:
+                        break
+                else:
+                    self.fail()
+                self.assertEqual(params['client_secret'], [providerInfo['client_secret']['value']])
+            except (KeyError, AssertionError) as e:
+                returnBody = json.dumps({
+                    'error': repr(e),
+                    'error_description': repr(e)
+                })
+            else:
+                returnBody = json.dumps({
+                    'token_type': 'bearer',
+                    'access_token': account['access_token'],
+                    'scope': 'user:email'
+                })
+            return {
+                'status_code': 200,
+                'headers': {
+                    'Content-Type': 'application/json'
+                },
+                'content': returnBody
+            }
+
+        @httmock.urlmatch(scheme='https', netloc='^api.box.com$',
+                          path='^/2.0/users/me$', method='GET')
+        def mockBoxApiUser(url, request):
+            try:
+                for account in six.viewvalues(providerInfo['accounts']):
+                    if 'Bearer %s' % account['access_token'] == request.headers['Authorization']:
+                        break
+                else:
+                    self.fail()
+            except AssertionError as e:
+                return {
+                    'status_code': 401,
+                    'content': json.dumps({
+                        'message': repr(e)
+                    })
+                }
+            return json.dumps({
+                'id': account['user']['oauth']['id'],
+                'login': account['user']['email'],
+                'name': '%s %s' % (account['user']['firstName'], account['user']['lastName'])
+            })
+
+        with httmock.HTTMock(
+            mockBoxRedirect,
+            mockBoxToken,
+            mockBoxApiUser,
             # Must keep 'mockOtherRequest' last
             self.mockOtherRequest
         ):

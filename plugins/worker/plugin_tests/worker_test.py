@@ -20,25 +20,38 @@
 import json
 import mock
 import six
+from girder.models.folder import Folder
+from girder.models.setting import Setting
+from girder.models.token import Token
+from girder.models.upload import Upload
+from girder.models.user import User
 from tests import base
 
 JobStatus = None
 utils = None
 worker = None
+CustomJobStatus = None
 
 
 def setUpModule():
     base.enabledPlugins.append('worker')
     base.startServer()
 
-    global JobStatus, utils, worker
+    global JobStatus, utils, worker, CustomJobStatus
     from girder.plugins.jobs.constants import JobStatus
     from girder.plugins import worker
-    from girder.plugins.worker import utils
+    from girder.plugins.worker import utils, CustomJobStatus
 
 
 def tearDownModule():
     base.stopServer()
+
+
+def local_job(job):
+    from girder.plugins.jobs.models.job import Job
+
+    Job().updateJob(job, log='job running', status=JobStatus.RUNNING)
+    Job().updateJob(job, log='job ran', status=JobStatus.SUCCESS)
 
 
 class FakeAsyncResult(object):
@@ -50,14 +63,18 @@ class WorkerTestCase(base.TestCase):
     def setUp(self):
         base.TestCase.setUp(self)
 
-        self.users = [self.model('user').createUser(
+        self.users = [User().createUser(
             'usr' + str(n), 'passwd', 'tst', 'usr', 'u%d@u.com' % n)
             for n in range(2)]
         self.admin = self.users[0]
 
-        self.adminFolder = six.next(self.model('folder').childFolders(
+        self.adminFolder = six.next(Folder().childFolders(
             parent=self.admin, parentType='user', user=self.admin))
-        self.adminToken = self.model('token').createToken(self.admin)
+        self.adminToken = Token().createToken(self.admin)
+        sampleData = b'Hello world'
+        self.sampleFile = Upload().uploadFromFile(
+            obj=six.BytesIO(sampleData), size=len(sampleData), name='Sample',
+            parentType='folder', parent=self.adminFolder, user=self.admin)
 
     def testWorker(self):
         # Test the settings
@@ -73,7 +90,8 @@ class WorkerTestCase(base.TestCase):
         self.assertStatusOk(resp)
 
         # Create a job to be handled by the worker plugin
-        jobModel = self.model('job', 'jobs')
+        from girder.plugins.jobs.models.job import Job
+        jobModel = Job()
         job = jobModel.createJob(
             title='title', type='foo', handler='worker_handler',
             user=self.admin, public=False, args=(), kwargs={})
@@ -106,9 +124,13 @@ class WorkerTestCase(base.TestCase):
             })
 
             sendTaskCalls = celeryMock.return_value.send_task.mock_calls
+
             self.assertEqual(len(sendTaskCalls), 1)
             self.assertEqual(sendTaskCalls[0][1], (
                 'girder_worker.run', job['args'], job['kwargs']))
+
+            self.assertTrue('headers' in sendTaskCalls[0][2])
+            self.assertTrue('jobInfoSpec' in sendTaskCalls[0][2]['headers'])
 
             # Make sure we got and saved the celery task id
             job = jobModel.load(job['_id'], force=True)
@@ -117,6 +139,13 @@ class WorkerTestCase(base.TestCase):
 
     def testWorkerDifferentTask(self):
         # Test the settings
+        resp = self.request('/system/setting', method='PUT', params={
+            'key': worker.PluginSettings.API_URL,
+            'value': 'bad value'
+        }, user=self.admin)
+        self.assertStatus(resp, 400)
+        self.assertEqual(resp.json['message'], 'API URL must start with http:// or https://.')
+
         resp = self.request('/system/setting', method='PUT', params={
             'list': json.dumps([{
                 'key': worker.PluginSettings.BROKER,
@@ -129,12 +158,14 @@ class WorkerTestCase(base.TestCase):
         self.assertStatusOk(resp)
 
         # Create a job to be handled by the worker plugin
-        jobModel = self.model('job', 'jobs')
+        from girder.plugins.jobs.models.job import Job
+        jobModel = Job()
         job = jobModel.createJob(
             title='title', type='foo', handler='worker_handler',
             user=self.admin, public=False, args=(), kwargs={},
             otherFields={
-                'celeryTaskName': 'some_other.task'
+                'celeryTaskName': 'some_other.task',
+                'celeryQueue': 'my_other_q'
             })
 
         job['kwargs'] = {
@@ -159,3 +190,105 @@ class WorkerTestCase(base.TestCase):
             self.assertEqual(len(sendTaskCalls), 1)
             self.assertEqual(sendTaskCalls[0][1], (
                 'some_other.task', job['args'], job['kwargs']))
+            self.assertIn('queue', sendTaskCalls[0][2])
+            self.assertEqual(sendTaskCalls[0][2]['queue'], 'my_other_q')
+
+    def testWorkerCancel(self):
+        from girder.plugins.jobs.models.job import Job
+        jobModel = Job()
+        job = jobModel.createJob(
+            title='title', type='foo', handler='worker_handler',
+            user=self.admin, public=False, args=(), kwargs={})
+
+        job['kwargs'] = {
+            'jobInfo': utils.jobInfoSpec(job),
+            'inputs': [
+                utils.girderInputSpec(self.adminFolder, resourceType='folder')
+            ],
+            'outputs': [
+                utils.girderOutputSpec(self.adminFolder, token=self.adminToken)
+            ]
+        }
+        job = jobModel.save(job)
+        self.assertEqual(job['status'], JobStatus.INACTIVE)
+
+        # Schedule the job, make sure it is sent to celery
+        with mock.patch('celery.Celery') as celeryMock, \
+                mock.patch('girder.plugins.worker.AsyncResult') as asyncResult:
+            instance = celeryMock.return_value
+            instance.send_task.return_value = FakeAsyncResult()
+
+            jobModel.scheduleJob(job)
+            jobModel.cancelJob(job)
+
+            asyncResult.assert_called_with('fake_id', app=mock.ANY)
+            # Check we called revoke
+            asyncResult.return_value.revoke.assert_called_once()
+            job = jobModel.load(job['_id'], force=True)
+            self.assertEqual(job['status'], CustomJobStatus.CANCELING)
+
+    def testWorkerWithParent(self):
+        from girder.plugins.jobs.models.job import Job
+        jobModel = Job()
+        parentJob = jobModel.createJob(
+            title='title', type='foo', handler='worker_handler',
+            user=self.admin, public=False, otherFields={'celeryTaskId': '1234'})
+        childJob = jobModel.createJob(
+            title='title', type='foo', handler='worker_handler',
+            user=self.admin, public=False, otherFields={'celeryTaskId': '5678',
+                                                        'celeryParentTaskId': '1234'})
+
+        self.assertEqual(parentJob['_id'], childJob['parentId'])
+
+    def testLocalJob(self):
+        # Make sure local jobs still work
+        from girder.plugins.jobs.models.job import Job
+        job = Job().createLocalJob(
+            title='local', type='local', user=self.users[0],
+            module='plugin_tests.worker_test', function='local_job')
+
+        Job().scheduleJob(job)
+
+        job = Job().load(job['_id'], force=True, includeLog=True)
+        self.assertIn('job ran', job['log'])
+
+    def testGirderInputSpec(self):
+        # Set an API_URL so we can use the spec outside of a rest request
+        Setting().set(worker.PluginSettings.API_URL, 'http://127.0.0.1')
+        Setting().set(worker.PluginSettings.DIRECT_PATH, True)
+
+        spec = utils.girderInputSpec(self.adminFolder, resourceType='folder')
+        self.assertEqual(spec['id'], str(self.adminFolder['_id']))
+        self.assertEqual(spec['resource_type'], 'folder')
+        self.assertFalse(spec['fetch_parent'])
+        self.assertNotIn('direct_path', spec)
+
+        spec = utils.girderInputSpec(self.sampleFile, resourceType='file')
+        self.assertEqual(spec['id'], str(self.sampleFile['_id']))
+        self.assertEqual(spec['resource_type'], 'file')
+        self.assertFalse(spec['fetch_parent'])
+        self.assertIn('direct_path', spec)
+
+        Setting().set(worker.PluginSettings.DIRECT_PATH, False)
+        spec = utils.girderInputSpec(self.sampleFile, resourceType='file')
+        self.assertFalse(spec['fetch_parent'])
+        self.assertNotIn('direct_path', spec)
+
+        Setting().set(worker.PluginSettings.DIRECT_PATH, True)
+        spec = utils.girderInputSpec(self.sampleFile, resourceType='file', fetchParent=True)
+        self.assertTrue(spec['fetch_parent'])
+        self.assertNotIn('direct_path', spec)
+
+    def testDirectPathSettingValidation(self):
+        # Test the setting
+        resp = self.request('/system/setting', method='PUT', params={
+            'key': worker.PluginSettings.DIRECT_PATH,
+            'value': 'bad value'
+        }, user=self.admin)
+        self.assertStatus(resp, 400)
+        self.assertEqual(resp.json['message'], 'The direct path setting must be true or false.')
+        resp = self.request('/system/setting', method='PUT', params={
+            'key': worker.PluginSettings.DIRECT_PATH,
+            'value': 'false'
+        }, user=self.admin)
+        self.assertStatusOk(resp)

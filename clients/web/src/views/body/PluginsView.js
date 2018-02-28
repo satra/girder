@@ -1,19 +1,23 @@
 import $ from 'jquery';
 import _ from 'underscore';
+// Bootstrap tooltip is required by popover
+import 'bootstrap/js/tooltip';
+import 'bootstrap/js/popover';
 
 import events from 'girder/events';
 import router from 'girder/router';
 import View from 'girder/views/View';
+import { confirm } from 'girder/dialog';
 import { getPluginConfigRoute } from 'girder/utilities/PluginUtils';
-import { restartServerPrompt } from 'girder/server';
+import { restartServer, rebuildWebClient } from 'girder/server';
 import { restRequest, cancelRestRequests } from 'girder/rest';
 
+import PluginFailedNoticeTemplate from 'girder/templates/widgets/pluginFailedNotice.pug';
 import PluginsTemplate from 'girder/templates/body/plugins.pug';
 
 import 'girder/utilities/jquery/girderEnable';
 import 'girder/stylesheets/body/plugins.styl';
 
-import 'bootstrap/js/tooltip';
 import 'bootstrap-switch'; // /dist/js/bootstrap-switch.js',
 import 'bootstrap-switch/dist/css/bootstrap3/bootstrap-switch.css';
 
@@ -24,25 +28,30 @@ var PluginsView = View.extend({
     events: {
         'click a.g-plugin-config-link': function (evt) {
             var route = $(evt.currentTarget).attr('g-route');
-            router.navigate(route, {trigger: true});
+            router.navigate(route, { trigger: true });
         },
-        'click .g-plugin-restart-button': restartServerPrompt,
-        'click .g-rebuild-web-code': function (e) {
-            $(e.currentTarget).girderEnable(false);
-            restRequest({
-                path: 'system/web_build',
-                type: 'POST',
-                data: {
-                    progress: true
+        'click .g-rebuild-and-restart': function (e) {
+            confirm({
+                text: `Are you sure you want to rebuild web code and restart the server? This will interrupt all running tasks for all users.`,
+                yesText: 'Restart',
+                confirmCallback: function () {
+                    $(e.currentTarget).girderEnable(false);
+                    rebuildWebClient()
+                        .then(() => {
+                            events.trigger('g:alert', {
+                                text: 'Web client code built successfully',
+                                type: 'success',
+                                duration: 3000
+                            });
+
+                            return restartServer();
+                        })
+                        .always(() => {
+                            // Re-enable the button whether the chain succeeds or fails, though if
+                            // it succeeds, the page will probably be refreshed
+                            $(e.currentTarget).girderEnable(true);
+                        });
                 }
-            }).done(() => {
-                events.trigger('g:alert', {
-                    text: 'Web client code built successfully',
-                    type: 'success',
-                    duration: 3000
-                });
-            }).complete(() => {
-                $(e.currentTarget).girderEnable(true);
             });
         }
     },
@@ -50,24 +59,41 @@ var PluginsView = View.extend({
     initialize: function (settings) {
         cancelRestRequests('fetch');
         if (settings.all && settings.enabled) {
+            this.cherrypyServer = (_.has(settings, 'cherrypyServer') ? settings.cherrypyServer : true);
             this.enabled = settings.enabled;
             this.allPlugins = settings.all;
+            this.failed = _.has(settings, 'failed') ? settings.failed : null;
             this.render();
         } else {
+            const promises = [
+                restRequest({
+                    url: 'system/plugins',
+                    method: 'GET'
+                }).then((resp) => resp),
+                restRequest({
+                    url: 'system/configuration',
+                    method: 'GET',
+                    data: {
+                        section: 'server',
+                        key: 'cherrypy_server'
+                    }
+                }).then((resp) => resp)
+            ];
+
             // Fetch the plugin list
-            restRequest({
-                path: 'system/plugins',
-                type: 'GET'
-            }).done(_.bind(function (resp) {
-                this.enabled = resp.enabled;
-                this.allPlugins = resp.all;
+            $.when(...promises).done((plugins, cherrypyServer) => {
+                this.cherrypyServer = cherrypyServer;
+                this.enabled = plugins.enabled;
+                this.allPlugins = plugins.all;
+                this.failed = plugins.failed;
                 this.render();
-            }, this));
+            }).fail(() => {
+                router.navigate('/', { trigger: true });
+            });
         }
     },
 
     render: function () {
-        var pluginsChanged = false;
         _.each(this.allPlugins, function (info, name) {
             info.unmetDependencies = this._unmetDependencies(info);
             if (!_.isEmpty(info.unmetDependencies)) {
@@ -79,43 +105,52 @@ var PluginsView = View.extend({
                 info.enabled = true;
                 info.configRoute = getPluginConfigRoute(name);
             }
+
+            if (this.failed && _.has(this.failed, name)) {
+                info.failed = this.failed[name];
+            }
         }, this);
 
         this.$el.html(PluginsTemplate({
+            cherrypyServer: this.cherrypyServer,
             allPlugins: this._sortPlugins(this.allPlugins)
         }));
 
-        var view = this;
         this.$('.g-plugin-switch').bootstrapSwitch()
-          .off('switchChange.bootstrapSwitch')
-          .on('switchChange.bootstrapSwitch', function (event, state) {
-              var plugin = $(event.currentTarget).attr('key');
-              if (state === true) {
-                  view.enabled.push(plugin);
-              } else {
-                  var idx;
-                  while ((idx = view.enabled.indexOf(plugin)) >= 0) {
-                      view.enabled.splice(idx, 1);
-                  }
-              }
-              pluginsChanged = true;
-              $('.g-plugin-restart').addClass('g-plugin-restart-show');
-              view._updatePlugins();
-          });
-        this.$('.g-plugin-config-link').tooltip({
+            .off('switchChange.bootstrapSwitch')
+            .on('switchChange.bootstrapSwitch', (event, state) => {
+                var plugin = $(event.currentTarget).attr('key');
+                if (state === true) {
+                    this.enabled.push(plugin);
+                } else {
+                    var idx;
+                    while ((idx = this.enabled.indexOf(plugin)) >= 0) {
+                        this.enabled.splice(idx, 1);
+                    }
+                }
+                this.$('button.g-rebuild-and-restart').addClass('btn-danger');
+
+                if (this.cherrypyServer) {
+                    this.$('.g-plugin-rebuild-restart-text').addClass('show');
+                }
+
+                if (!this.cherrypyServer && !_.has(this, 'displayedCherrypyNotification')) {
+                    this.displayedCherrypyNotification = true;
+
+                    events.trigger('g:alert', {
+                        text: `Enabling and disabling plugins might not take effect until the system administrator has restarted Girder.`,
+                        type: 'info',
+                        timeout: 5000,
+                        icon: 'info'
+                    });
+                }
+
+                this._updatePlugins();
+            });
+        this.$('.g-plugin-list-item-failed-notice').popover({
             container: this.$el,
-            animation: false,
-            placement: 'bottom',
-            delay: {show: 100}
+            template: PluginFailedNoticeTemplate()
         });
-        this.$('.g-experimental-notice').tooltip({
-            container: this.$el,
-            animation: false,
-            delay: {show: 100}
-        });
-        if (pluginsChanged) {
-            $('.g-plugin-restart').addClass('g-plugin-restart-show');
-        }
 
         return this;
     },
@@ -143,7 +178,7 @@ var PluginsView = View.extend({
          *                 attribute used for sorting.
          * @returns sortedPlugins: the sorted list. */
         var sortedPlugins = _.map(plugins, function (value, key) {
-            return {key: key, value: value};
+            return { key: key, value: value };
         });
         sortedPlugins.sort(function (a, b) {
             return a.value.name.localeCompare(b.value.name);
@@ -157,19 +192,19 @@ var PluginsView = View.extend({
         this.enabled = _.intersection(this.enabled, _.keys(this.allPlugins));
 
         restRequest({
-            path: 'system/plugins',
-            type: 'PUT',
+            url: 'system/plugins',
+            method: 'PUT',
             data: {
                 plugins: JSON.stringify(this.enabled)
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.enabled = resp.value;
 
             _.each(this.enabled, function (plugin) {
                 this.$('.g-plugin-switch[key="' + plugin + '"]')
                     .attr('checked', 'checked').bootstrapSwitch('state', true, true);
             }, this);
-        }, this));  // TODO acknowledge?
+        }); // TODO acknowledge?
     }
 });
 

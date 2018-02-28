@@ -23,23 +23,204 @@ module.exports = function (grunt) {
     var path = require('path');
     var child_process = require('child_process'); // eslint-disable-line camelcase
 
-    var customWebpackPlugins = require('./webpack.plugins.js');
+    var ExtractTextPlugin = require('extract-text-webpack-plugin');
+    var webpack = require('webpack');
     var paths = require('./webpack.paths.js');
+    var webpackPlugins = require('./webpack.plugins.js');
 
-    var buildAll = grunt.option('all-plugins');
+    var configurePlugins = grunt.option('configure-plugins');
     var plugins = grunt.option('plugins');
+
+    if (grunt.option('all-plugins')) {
+        grunt.fail.warn(
+            'The --all-plugins option no longer works, use `girder-install web --all-plugins` instead.');
+    }
 
     if (_.isString(plugins) && plugins) {
         plugins = plugins.split(',');
-    } else if (!buildAll) {
+    } else {
+        plugins = [];
+    }
+
+    if (_.isString(configurePlugins) && configurePlugins) {
+        configurePlugins = configurePlugins.split(',');
+    } else {
+        configurePlugins = [];
+    }
+
+    if (!plugins.length && !configurePlugins.length) {
         return;
     }
+
+    require('colors');
 
     grunt.config.merge({
         default: {
             plugin: {}
         }
     });
+
+    /**
+     * Collect dependencies from a package.json-like object.
+     */
+    function getDependencies(obj, fields, deps) {
+        deps = deps || {};
+        fields = fields || ['dependencies'];
+
+        _.each(fields, function (field) {
+            _.extend(deps, obj[field]);
+        });
+        return deps;
+    }
+
+    /**
+     * Run npm install in the given prefix directory.
+     *
+     * @param {object} [deps]
+     *   A dependency -> version mapping in the same syntax provided
+     *   in a package.json file.
+     *
+     * @param {string} [prefix]
+     *   The `--prefix` argument to the npm command.
+     */
+    function npmInstall(deps, prefix) {
+        var args = [];
+
+        if (prefix) {
+            args = ['--prefix', prefix];
+        }
+        args = args.concat(['--color=always', 'install', '--no-save']);
+
+        if (deps) {
+            args = args.concat(
+                _.map(deps, function (version, dep) {
+                    return dep + '@' + version;
+                })
+            );
+        }
+
+        var child = child_process.spawnSync('npm', args, {
+            stdio: 'inherit'
+        });
+
+        if (child.status !== 0) {
+            grunt.fail.fatal(`"npm ${args.join(' ')}" failed`);
+        }
+    }
+
+    /**
+     * Handle a request for extra dependencies.  Those provided will
+     * be stored in the grunt config object and installed in a task
+     * added after all plugins have been configured.
+     *
+     * @param {object} deps
+     *   A dependency -> version mapping in the same syntax provided
+     *   in a package.json file.  If no object is given, it will fall
+     *   back to the default behavior of `npm install` executed in
+     *   the given path.
+     *
+     * @param {string} [prefix]
+     *   The path where the packages will be installed.  By default,
+     *   this will be the main girder directory.
+     */
+    function addDependencies(deps, prefix) {
+        var config = {};
+
+        if (prefix) {
+            config.local = {[prefix]: deps};
+        } else {
+            config.global = deps;
+        }
+
+        grunt.config.merge({
+            'npm-install-plugins': config
+        });
+    }
+
+    /**
+     * This inspects the plugin directory to configure installation of external
+     * dependencies that must by installed via npm prior to building the
+     * plugin.  There are several cases that this handles:
+     *
+     *   1. `package.json` in the plugin directory
+     *   2. `plugin.json` dependencies installed to a custom prefix
+     *   3. `plugin.json` dependencies installed to girder's prefix
+     *   4. `plugin.json` grunt dependencies installed into girder's prefix
+     *
+     * Cases (1) and (2) are handled by running a custom invocation `npm install`
+     * for each plugin.  For cases (3) and (4), the dependency lists are aggregated
+     * and installed in a single invocation for all plugins.  This is done for two
+     * reasons: it reduces the number of time `npm install` is executed (which is
+     * slow) and it eliminates the problem of autopruning the `node_modules`
+     * directory by npm@5.
+     *
+     * @param {string} pluginName
+     *   The name of the plugin.
+     * @param {string} pluginDir
+     *   The path to the plugin's directory.
+     * @param {object} pluginConfig
+     *   The plugin config object.
+     */
+    function processPluginDependencies(pluginName, pluginDir, pluginConfig) {
+        var npmConfig = pluginConfig.npm || {};
+        var fields, npmFile, prefix, deps;
+
+        // get dependencies from the plugin config object
+        deps = getDependencies(npmConfig);
+
+        // `npm.install` is a shortcut to installing directly from package.json
+        if (npmConfig.install) {
+            npmConfig.file = 'package.json';
+            npmConfig.fields = ['dependencies'];
+        }
+
+        // get dependencies from a package.json file
+        if (npmConfig.file) {
+            npmFile = path.resolve(pluginDir, npmConfig.file);
+            fields = npmConfig.fields || [
+                'devDependencies', 'dependencies', 'optionalDependencies'
+            ];
+
+            grunt.log.writeln('  >> Loading NPM dependencies from: ' + npmFile);
+            grunt.log.writeln('  >> Using fields: ' + fields.join(', '));
+
+            getDependencies(require(npmFile), fields, deps);
+        }
+
+        if (npmConfig.install) {
+            /*
+             * Case 1:
+            */
+            prefix = path.resolve(pluginDir, 'package.json');
+            grunt.log.writeln('  >> Installing NPM dependencies in-place from: ' + prefix);
+            addDependencies({}, prefix);
+        }
+
+        // The configuration for cases 2 and 3 are mutually exclusive
+        if (npmConfig.localNodeModules) {
+            /*
+             * Case 2:
+             */
+            grunt.log.writeln(`  >> Installing NPM dependencies to dedicated directory: girder_plugin_${pluginName}/node_modules`);
+            addDependencies(deps, getPluginLocalNodePath(pluginName));
+            deps = {};
+        } else {
+            /*
+             * Case 3:
+             */
+            grunt.verbose.writeln('  >> Installing NPM dependencies to Girder node_modules directory');
+        }
+
+        if (pluginConfig.grunt && pluginConfig.grunt.dependencies) {
+            /*
+             * Case 4:
+             */
+            deps = getDependencies(pluginConfig.grunt, null, deps);
+        }
+
+        // Add the collected dependencies to the global install list.
+        addDependencies(deps);
+    }
 
     /**
      * Adds configuration for plugin related multitasks:
@@ -82,7 +263,11 @@ module.exports = function (grunt) {
         grunt.config.merge(cfg);
     };
 
-    var configurePluginForBuilding = function (dir) {
+    var getPluginLocalNodePath = function (plugin) {
+        return path.resolve(path.join('node_modules', `girder_plugin_${plugin}`));
+    };
+
+    var configurePluginForBuilding = function (dir, buildPlugin) {
         var plugin = path.basename(dir);
         var json = path.resolve(dir, 'plugin.json');
         var yml = path.resolve(dir, 'plugin.yml');
@@ -102,7 +287,8 @@ module.exports = function (grunt) {
             config = grunt.file.readYAML(yml);
         }
 
-        console.log(`Configuring plugin ${plugin.magenta} (${cfgFile})`);
+        var buildText = `build=${buildPlugin ? 'ON'.green : 'OFF'.red}`;
+        grunt.log.writeln(`Configuring plugin ${plugin.magenta} (${cfgFile}, ${buildText})`);
 
         var doAutoBuild = (
             !_.isObject(config.grunt) ||
@@ -118,190 +304,195 @@ module.exports = function (grunt) {
 
         // Find the plugin's webpack helper file; default to the identity
         // function.
-        var webpackHelperFile = path.resolve(dir, config.webpack && config.webpack.configHelper || 'webpack.helper.js');
+        var webpackHelperFile = path.resolve(dir, (config.webpack && config.webpack.configHelper) || 'webpack.helper.js');
         var webpackHelper;
         if (fs.existsSync(webpackHelperFile)) {
-            console.log(`Loading webpack helper from ${webpackHelperFile}`);
+            grunt.log.writeln(`  >> Loading webpack helper from ${webpackHelperFile}`);
             webpackHelper = require(webpackHelperFile);
         } else {
-            console.log('No webpack helper file found.');
-            webpackHelper = function (x) {
-                return x;
-            };
+            grunt.verbose.writeln('  >> No webpack helper file found.');
+            webpackHelper = (x) => x;
         }
 
         // Configure the output file; default to 'plugin.min.js' - Girder loads
         // files named "plugin.min.js" into the Girder web client at runtime, so
         // the user can control whether this is a "Girder client extension" or
         // just a standalone web client.
-        var output = config.webpack && config.webpack.output || 'plugin';
-        var pluginEntry =  `plugins/${plugin}/${output}`;
-
-        var pluginNodeDir = path.resolve(process.cwd(), 'node_modules_' + plugin, 'node_modules');
-        var helperConfig = {
-            plugin: plugin,
-            pluginEntry: pluginEntry,
-            pluginDir: dir,
-            nodeDir: pluginNodeDir
-        };
+        var output = (config.webpack && config.webpack.output) || 'plugin';
+        var deps = config.dependencies || [];
+        var pluginNodeDir = path.join(getPluginLocalNodePath(plugin), 'node_modules');
 
         // Add webpack target and name resolution for this plugin if
         // web_client/main.js (or user-specified name) exists.
         var webClient = path.resolve(dir + '/web_client');
-        var main = config.webpack && config.webpack.main && path.resolve(dir, config.webpack.main) || webClient + '/main.js';
+        var mains = (config.webpack && config.webpack.main) || {};
 
-        if (fs.existsSync(main)) {
-            grunt.config.merge({
+        if (_.isString(mains)) {
+            // If main was specified as a string, convert to an object
+            mains = {
+                [output]: mains
+            };
+        } else if (_.isEmpty(mains)) {
+            // By default, use web_client/main.js if it exists.
+            var mainJs = path.resolve(webClient, 'main.js');
+
+            if (fs.existsSync(mainJs)) {
+                mains = {
+                    [output]: mainJs
+                };
+            }
+        }
+
+        _.each(mains, (main, output) => {
+            if (!path.isAbsolute(main)) {
+                main = path.resolve(dir, main);
+            }
+            if (!fs.existsSync(main)) {
+                throw new Error(`Entry point file ${main} not found.`);
+            }
+
+            var helperConfig = {
+                plugin,
+                output,
+                main,
+                pluginEntry: `plugins/${plugin}/${output}`,
+                pluginDir: dir,
+                nodeDir: pluginNodeDir
+            };
+
+            var configOpts = {
                 webpack: {
-                    [`plugin_${plugin}`]: {
-                        entry: {
-                            [helperConfig.pluginEntry]: [main]
-                        },
-                        plugins: [
-                            new customWebpackPlugins.DllReferenceByPathPlugin({
-                                context: '.',
-                                manifest: path.join(paths.web_built, 'girder_lib-manifest.json')
-                            })
-                        ]
-                    },
                     options: {
                         // Add an import alias to the global config for this plugin
                         resolve: {
                             alias: {
                                 [`girder_plugins/${plugin}/node`]: pluginNodeDir,
                                 [`girder_plugins/${plugin}`]: webClient
-                            },
-                            modules: [
-                                path.resolve(process.cwd(), 'node_modules'),
-                                pluginNodeDir
-                            ]
-                        },
-                        resolveLoader: {
-                            modules: [
-                                path.resolve(process.cwd(), 'node_modules'),
-                                pluginNodeDir
-                            ]
+                            }
                         }
                     }
                 }
-            });
+            };
 
-            grunt.config.merge({
-                default: {
-                    [`webpack:plugin_${plugin}`]: {
+            if (buildPlugin) {
+                configOpts.webpack[`${output}_${plugin}`] = {
+                    entry: {
+                        [helperConfig.pluginEntry]: [main]
+                    },
+                    module: {
+                        // We set these since webpack.helper.js functions may
+                        // expect these properties to be defined.
+                        loaders: [],
+                        rules: []
+                    },
+                    output: {
+                        path: path.join(paths.web_built, 'plugins', plugin),
+                        filename: `${output}.min.js`,
+                        library: `girder_plugin_${plugin}`
+                    },
+                    resolve: {
+                        alias: {
+                            // Make sure we use the core jquery rather than pulling one
+                            // from a plugin's local node modules. Multiple jquery versions
+                            // breaks due to use of side effects for jquery plugins.
+                            'jquery': path.resolve(paths.node_modules, 'jquery')
+                        },
+                        modules: [
+                            pluginNodeDir,
+                            path.resolve(dir, 'node_modules'),
+                            paths.node_modules
+                        ]
+                    },
+                    resolveLoader: {
+                        modules: [
+                            pluginNodeDir,
+                            path.resolve(dir, 'node_modules'),
+                            paths.node_modules
+                        ]
+                    },
+                    plugins: [
+                        // DllPlugin causes the plugin bundle to build a manifest so that
+                        // downstream bundles can share its modules at runtime rather
+                        // than copying them in statically.
+                        new webpack.DllPlugin({
+                            path: path.join(paths.web_built, 'plugins', plugin, `${output}-manifest.json`),
+                            name: `girder_plugin_${plugin}`
+                        }),
+                        // DllBootstrapPlugin allows the same plugin bundle to also
+                        // execute an entry point at load time instead of just exposing symbols
+                        // as a library.
+                        new webpackPlugins.DllBootstrapPlugin({
+                            [helperConfig.pluginEntry]: main
+                        }),
+                        // This plugin allows this bundle to dynamically link against girder's
+                        // core library bundle.
+                        new webpack.DllReferencePlugin({
+                            context: '.',
+                            manifest: path.join(paths.web_built, 'girder_lib-manifest.json')
+                        }),
+                        // This plugin pulls the CSS out of the bundle and into a separate file.
+                        new ExtractTextPlugin({
+                            filename: `${output}.min.css`,
+                            allChunks: true
+                        })
+                    ].concat(_.map(deps, (dep) => {
+                        // This dynamically links the current plugin against its
+                        // dependencies' bundles so they can share code.
+                        return new webpack.DllReferencePlugin({
+                            context: '.',
+                            manifest: path.join(paths.web_built, 'plugins', dep, 'plugin-manifest.json')
+                        });
+                    }))
+                };
+                configOpts.default = {
+                    [`webpack:${output}_${plugin}`]: {
                         dependencies: ['build'] // plugin builds must run after core build
                     }
+                };
+
+                var baseConfig = configOpts.webpack[`${output}_${plugin}`];
+                var newConfig = webpackHelper(baseConfig, helperConfig);
+                if (_.has(newConfig.module, 'loaders')) {
+                    if (!_.isEmpty(newConfig.module.loaders)) {
+                        grunt.log.writeln(`  >> "module.loaders" is deprecated, use "module.rules" in ${webpackHelperFile} instead.`.yellow);
+                        newConfig.module.rules = newConfig.module.rules || [];
+                        newConfig.module.rules = newConfig.module.rules.concat(newConfig.module.loaders);
+                    }
+                    delete newConfig.module.loaders;
                 }
-            });
+                grunt.config.set(`webpack.${output}_${plugin}`, newConfig);
+            }
 
             // If the plugin config has no webpack section, no defaultLoaders
             // property in the webpack section, or the defaultLoaders is
             // explicitly set to anything besides false, then augment the
             // webpack loader configurations with the plugin source directory.
             if (!config.webpack || config.webpack.defaultLoaders === undefined || config.webpack.defaultLoaders !== false) {
-                var numLoaders = grunt.config.get('webpack.options.module.loaders').length;
+                var numLoaders = grunt.config.get('webpack.options.module.rules').length;
                 for (var i = 0; i < numLoaders; i++) {
-                    var selector = 'webpack.options.module.loaders.' + i + '.include';
-                    var loaders = grunt.config.get(selector);
-                    grunt.config.set(selector, loaders.concat([path.resolve(dir)]));
+                    var selector = `webpack.options.module.rules.${i}.resource.include`;
+                    var loaders = grunt.config.get(selector) || [];
+                    var pluginPath = path.resolve(dir);
+                    var realPath = fs.realpathSync(dir);
+                    var loaderIncludes = [pluginPath];
+
+                    // We add the plugin path to the include list for the loaders, and also
+                    // add the realpath (i.e. following symlinks) to workaround an issue where
+                    // webpack doesn't resolve symlinked include directories correctly.
+                    if (realPath !== pluginPath) {
+                        loaderIncludes.push(realPath);
+                    }
+
+                    grunt.config.set(selector, loaders.concat(loaderIncludes));
                 }
             }
-
-            var newConfig = webpackHelper(grunt.config.get('webpack.options'), helperConfig);
-            grunt.config.set('webpack.options', newConfig);
-        }
-
-        grunt.registerTask('npm-install', 'Install plugin NPM dependencies', function (plugin, localNodeModules) {
-            // Start building the list of arguments to the NPM executable.
-            //
-            // We want color output embedded in the Grunt output.
-            var args = ['--color=always'];
-
-            // If the plugin requested to install the dependencies in its own
-            // dedicated directory, set the prefix option.
-            if (localNodeModules === 'true') {
-                args = args.concat(['--prefix', path.resolve('node_modules_' + plugin)]);
-            }
-
-            // Get the list of the packages to install and append them to the
-            // args object.
-            var modules = Array.prototype.slice.call(arguments, 2);
-            args = args.concat(['install'], modules);
-
-            // Launch the child process.
-            var child = child_process.spawnSync('npm', args, {
-                stdio: 'inherit'
-            });
-
-            return child.status === 0;
+            grunt.config.merge(configOpts);
         });
-
-        function addDependencies(deps, localNodeModules) {
-            // install any additional npm packages during init
-            var npm = (
-                _(deps || {})
-                    .map(function (version, dep) {
-                        return [
-                            dep.replace(':', '\\:'),
-                            version.replace(':', '\\:')
-                        ].join('@');
-                    })
-            );
-
-            if (npm.length) {
-                grunt.config.set('default.npm-install:' + plugin + ':' + !!localNodeModules + ':' + grunt.config.escape(npm.join(':')), {});
-            }
-        }
-
-        if (config.npm) {
-            var modules = {};
-
-            // If the config contains a "file" section, load NPM dependencies
-            // from it.
-            if (config.npm.file) {
-                var npmFile = require(path.resolve(dir, config.npm.file));
-                var fields = config.npm.fields || ['devDependencies', 'dependencies', 'optionalDependencies'];
-
-                grunt.log.writeln('Loading NPM dependencies from: ' + config.npm.file);
-                grunt.log.writeln('Using fields: ' + fields.join(', '));
-
-                fields.forEach(function (field) {
-                    _.each(npmFile[field] || {}, function (version, dep) {
-                        modules[dep] = version;
-                    });
-                });
-            }
-
-            // Additionally add any extra dependencies found in the
-            // "dependencies" property.
-            if (config.npm.dependencies) {
-                if (config.npm.file) {
-                    grunt.log.writeln('Loading additional dependencies');
-                } else {
-                    grunt.log.writeln('Loading dependencies');
-                }
-
-                _.each(config.npm.dependencies, function (version, dep) {
-                    modules[dep] = version;
-                });
-            }
-
-            if (config.npm.localNodeModules) {
-                grunt.log.writeln('Installing dependencies to dedicated directory: node_modules_' + plugin);
-            } else {
-                grunt.log.writeln('Installing dependencies to Girder node_modules directory');
-            }
-
-            // Invoke the npm installation task.
-            addDependencies(modules, config.npm.localNodeModules);
-        }
 
         if (config.grunt) {
             grunt.log.writeln((
                 'Configuring plugin: ' + plugin + ' (custom Gruntfile)'
             ).bold);
-
-            addDependencies(config.grunt.dependencies);
 
             // load the plugin's gruntfile
             try {
@@ -309,7 +500,6 @@ module.exports = function (grunt) {
                     path.resolve(dir, config.grunt.file || 'Gruntfile.js')
                 )(grunt);
             } catch (e) {
-                // the error can be safely ignored when doing `grunt init`
                 // otherwise a default task will most likely fail later on
                 // write out a warning to help the developers debug errors
                 grunt.log.writeln((
@@ -323,19 +513,54 @@ module.exports = function (grunt) {
                 grunt.config.set('default.' + target, {});
             });
         }
+
+        // process all external dependencies when building
+        processPluginDependencies(plugin, dir, config);
+
+        // Make sure the npm task runs before plugin build tasks
+        grunt.config.set(`default.plugin:${plugin}`, {
+            dependencies: ['npm-install-plugins']
+        });
+
+        // For backward compatibility, we still generate the old 'npm-install'
+        // task as a noop, but ensure that the real npm install task is
+        // executed as a prerequisite.
+        grunt.config.set(`default.npm-install:${plugin}`, {
+            dependencies: ['npm-install-plugins']
+        });
     };
 
-    if (buildAll) {
-        // Glob for plugins and configure each one to be built
-        grunt.file.expand(grunt.config.get('pluginDir') + '/*').forEach(function (dir) {
-            configurePluginForBuilding(dir);
-        });
-    } else {
-        // Build only the plugins that were requested via --plugins
-        plugins.forEach(function (name) {
-            configurePluginForBuilding(path.resolve(grunt.config.get('pluginDir'), name));
-        });
-    }
+    // Configure the plugins that were requested via --configure-plugins in order
+    configurePlugins.forEach(function (name) {
+        configurePluginForBuilding(path.resolve(grunt.config.get('pluginDir'), name), false);
+    });
+    // Build the plugins that were requested via --plugins in order
+    plugins.forEach(function (name) {
+        configurePluginForBuilding(path.resolve(grunt.config.get('pluginDir'), name), true);
+    });
+
+    /**
+     * This task is noop that exists for backwards compatibility in case any plugins rely
+     * on its existence.
+     * @deprecated: remove in v3
+     */
+    grunt.registerTask(
+        'npm-install', 'Install plugin NPM dependencies (deprecated)',
+        _.constant(true)
+    );
+
+    grunt.registerTask(
+        'npm-install-plugins', 'Install all NPM dependencies',
+        function () {
+            var local = grunt.config.get('npm-install-plugins.local') || {};
+            var global = grunt.config.get('npm-install-plugins.global') || {};
+
+            if (!_.isEmpty(global)) {
+                npmInstall(global);
+            }
+            _.each(local, npmInstall);
+        }
+    );
 
     /**
      * Register a "meta" task that will configure and run other tasks
@@ -353,4 +578,6 @@ module.exports = function (grunt) {
             grunt.task.run(task);
         });
     });
+
+    grunt.config.set('default.npm-install-plugins', []);
 };

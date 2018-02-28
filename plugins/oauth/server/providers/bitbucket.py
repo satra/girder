@@ -19,30 +19,29 @@
 
 from six.moves import urllib
 
-from girder.api.rest import getApiUrl, RestException
+from girder.api.rest import getApiUrl
+from girder.exceptions import RestException
+from girder.models.setting import Setting
 from .base import ProviderBase
 from .. import constants
 
 
 class Bitbucket(ProviderBase):
     _AUTH_URL = 'https://bitbucket.org/site/oauth2/authorize'
-    _AUTH_SCOPES = ('account',)
+    _AUTH_SCOPES = ['account']
     _TOKEN_URL = 'https://bitbucket.org/site/oauth2/access_token'
     _API_USER_URL = 'https://api.bitbucket.org/2.0/user'
     _API_EMAILS_URL = 'https://api.bitbucket.org/2.0/user/emails'
 
     def getClientIdSetting(self):
-        return self.model('setting').get(
-            constants.PluginSettings.BITBUCKET_CLIENT_ID)
+        return Setting().get(constants.PluginSettings.BITBUCKET_CLIENT_ID)
 
     def getClientSecretSetting(self):
-        return self.model('setting').get(
-            constants.PluginSettings.BITBUCKET_CLIENT_SECRET)
+        return Setting().get(constants.PluginSettings.BITBUCKET_CLIENT_SECRET)
 
     @classmethod
     def getUrl(cls, state):
-        clientId = cls.model('setting').get(
-            constants.PluginSettings.BITBUCKET_CLIENT_ID)
+        clientId = Setting().get(constants.PluginSettings.BITBUCKET_CLIENT_ID)
 
         if clientId is None:
             raise Exception('No Bitbucket client ID setting is present.')

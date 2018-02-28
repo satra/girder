@@ -14,11 +14,25 @@ import ItemListTemplate from 'girder/templates/widgets/itemList.pug';
 var ItemListWidget = View.extend({
     events: {
         'click a.g-item-list-link': function (event) {
+            event.preventDefault();
             var cid = $(event.currentTarget).attr('g-item-cid');
             this.trigger('g:itemClicked', this.collection.get(cid), event);
         },
         'click a.g-show-more-items': function () {
             this.collection.fetchNextPage();
+        },
+        'change .g-list-checkbox': function (event) {
+            const target = $(event.currentTarget);
+            const cid = target.attr('g-item-cid');
+            if (target.prop('checked')) {
+                this.checked.push(cid);
+            } else {
+                const idx = this.checked.indexOf(cid);
+                if (idx !== -1) {
+                    this.checked.splice(idx, 1);
+                }
+            }
+            this.trigger('g:checkboxesChanged');
         }
     },
 
@@ -26,11 +40,13 @@ var ItemListWidget = View.extend({
         this.checked = [];
         this._checkboxes = settings.checkboxes;
         this._downloadLinks = (
-          _.has(settings, 'downloadLinks') ? settings.downloadLinks : true);
+            _.has(settings, 'downloadLinks') ? settings.downloadLinks : true);
         this._viewLinks = (
-          _.has(settings, 'viewLinks') ? settings.viewLinks : true);
+            _.has(settings, 'viewLinks') ? settings.viewLinks : true);
         this._showSizes = (
-          _.has(settings, 'showSizes') ? settings.showSizes : true);
+            _.has(settings, 'showSizes') ? settings.showSizes : true);
+        this.accessLevel = settings.accessLevel;
+        this.public = settings.public;
 
         new LoadingAnimation({
             el: this.$el,
@@ -39,18 +55,24 @@ var ItemListWidget = View.extend({
 
         this.collection = new ItemCollection();
         this.collection.append = true; // Append, don't replace pages
+        this.collection.filterFunc = settings.itemFilter;
+
         this.collection.on('g:changed', function () {
+            if (this.accessLevel !== undefined) {
+                this.collection.each((model) => {
+                    model.set('_accessLevel', this.accessLevel);
+                });
+            }
             this.render();
             this.trigger('g:changed');
-        }, this).fetch({
-            folderId: settings.folderId
-        });
+        }, this).fetch({ folderId: settings.folderId });
     },
 
     render: function () {
         this.checked = [];
         this.$el.html(ItemListTemplate({
             items: this.collection.toArray(),
+            isParentPublic: this.public,
             hasMore: this.collection.hasNextPage(),
             formatSize: formatSize,
             checkboxes: this._checkboxes,
@@ -59,25 +81,6 @@ var ItemListWidget = View.extend({
             showSizes: this._showSizes
         }));
 
-        this.$('.g-item-list-entry a[title]').tooltip({
-            container: 'body',
-            placement: 'auto',
-            delay: 100
-        });
-
-        var view = this;
-        this.$('.g-list-checkbox').change(function () {
-            var cid = $(this).attr('g-item-cid');
-            if (this.checked) {
-                view.checked.push(cid);
-            } else {
-                var idx = view.checked.indexOf(cid);
-                if (idx !== -1) {
-                    view.checked.splice(idx, 1);
-                }
-            }
-            view.trigger('g:checkboxesChanged');
-        });
         return this;
     },
 
@@ -85,6 +88,9 @@ var ItemListWidget = View.extend({
      * Insert an item into the collection and re-render it.
      */
     insertItem: function (item) {
+        if (this.accessLevel !== undefined) {
+            item.set('_accessLevel', this.accessLevel);
+        }
         this.collection.add(item);
         this.trigger('g:changed');
         this.render();

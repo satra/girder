@@ -1,14 +1,10 @@
-/**
- * Start the girder backbone app.
- */
 girderTest.startApp();
 
-function _editItem(button, buttonText)
 /* Show the item edit dialog and click a button.
  * :param button: the jquery selector for the button.
  * :param buttonText: the expected text of the button.
  */
-{
+function _editItem(button, buttonText) {
     waitsFor(function () {
         return $('.g-item-actions-button:visible').length === 1;
     }, 'the item actions button to appear');
@@ -44,31 +40,99 @@ function _editItem(button, buttonText)
     girderTest.waitForLoad();
 }
 
+function _addItemToFolder(folder) {
+    var isPublic = 'false';
+
+    if (folder === 'Public') {
+        isPublic = 'true';
+    }
+
+    waitsFor(function () {
+        return $('a.g-folder-list-link:contains(' + folder + '):visible').length === 1;
+    }, 'the ' + folder + ' folder to be clickable');
+
+    runs(function () {
+        $('a.g-folder-list-link:contains(' + folder + ')').click();
+    });
+
+    waitsFor(function () {
+        return $('.g-empty-parent-message:visible').length === 1 &&
+            $('.g-folder-actions-button:visible').length === 1;
+    }, 'message that the folder is empty');
+
+    runs(function () {
+        $('.g-folder-actions-button:visible').click();
+    });
+
+    waitsFor(function () {
+        return $('a.g-create-item:visible').length === 1;
+    }, 'create item option is clickable');
+
+    runs(function () {
+        $('.g-create-item:visible').click();
+    });
+
+    waitsFor(function () {
+        return Backbone.history.fragment.slice(-18) === '?dialog=itemcreate';
+    }, 'the url state to change');
+
+    waitsFor(function () {
+        return $('a.btn-default:visible').text() === 'Cancel';
+    }, 'the cancel button of the item create dialog to appear');
+    girderTest.waitForDialog();
+
+    runs(function () {
+        $('#g-name').val('Test Item Name');
+        $('#item-description-write .g-markdown-text').val('Test Item Description');
+        $('.g-save-item').click();
+    });
+
+    waitsFor(function () {
+        return $('a.g-item-list-link:contains(Test Item Name)').length === 1;
+    }, 'the new item to appear in the list');
+    girderTest.waitForLoad();
+
+    runs(function () {
+        expect($('li.g-item-list-entry').attr('public')).toBe(isPublic);
+        $('a.g-item-list-link:contains(Test Item Name)').click();
+    });
+
+    waitsFor(function () {
+        return $('.g-item-name:contains(Test Item Name)').length === 1;
+    }, 'the item page to load');
+
+    runs(function () {
+        expect($('.g-item-name').text()).toBe('Test Item Name');
+        expect($('.g-item-description').text().trim()).toBe('Test Item Description');
+        expect($('.g-item-id').text()).toMatch(/[a-f0-9]{24}/);
+    });
+}
+
 describe('Test item creation, editing, and deletion', function () {
     it('register a user (first is admin)',
         girderTest.createUser('admin',
-                              'admin@email.com',
-                              'Admin',
-                              'Admin',
-                              'adminpassword!'));
+            'admin@email.com',
+            'Admin',
+            'Admin',
+            'adminpassword!'));
 
     it('logout', girderTest.logout());
 
     it('register another user',
         girderTest.createUser('seconduser',
-                              'seconduser@email.com',
-                              'Second',
-                              'User',
-                              'password!'));
+            'seconduser@email.com',
+            'Second',
+            'User',
+            'password!'));
 
     it('logout', girderTest.logout());
 
     it('register a third user',
         girderTest.createUser('nonadmin',
-                              'nonadmin@email.com',
-                              'Not',
-                              'Admin',
-                              'password!'));
+            'nonadmin@email.com',
+            'Not',
+            'Admin',
+            'password!'));
 
     it('go to users page', girderTest.goToUsersPage());
 
@@ -78,7 +142,7 @@ describe('Test item creation, editing, and deletion', function () {
         });
 
         runs(function () {
-            $("a.g-user-link:contains('Not Admin')").click();
+            $('a.g-user-link:contains("Not Admin")').click();
         });
 
         waitsFor(function () {
@@ -87,69 +151,28 @@ describe('Test item creation, editing, and deletion', function () {
 
         // check for actions menu
         runs(function () {
-            expect($("button:contains('Actions')").length).toBe(1);
+            expect($('button:contains("Actions")').length).toBe(1);
         });
     });
 
     it('create an item in the public folder of the user', function () {
+        _addItemToFolder('Public');
+    });
 
-        waitsFor(function () {
-            return $('a.g-folder-list-link:contains(Public):visible').length === 1;
-        }, 'the public folder to be clickable');
+    it('go to users page', girderTest.goToUsersPage());
 
+    it('view the users on the user page and click on one', function () {
         runs(function () {
-            $('a.g-folder-list-link:contains(Public)').click();
+            $('a.g-user-link:contains("Not Admin")').click();
         });
 
         waitsFor(function () {
-            return $('.g-empty-parent-message:visible').length === 1 &&
-                   $('.g-folder-actions-button:visible').length === 1;
-        }, 'message that the folder is empty');
+            return $('.g-user-name').text() === 'Not Admin';
+        }, 'user page to appear');
+    });
 
-        runs(function () {
-            $('.g-folder-actions-button:visible').click();
-        });
-
-        waitsFor(function () {
-            return $('a.g-create-item:visible').length === 1;
-        }, 'create item option is clickable');
-
-        runs(function () {
-            $('.g-create-item:visible').click();
-        });
-
-        waitsFor(function () {
-            return Backbone.history.fragment.slice(-18) === '?dialog=itemcreate';
-        }, 'the url state to change');
-
-        waitsFor(function () {
-            return $('a.btn-default:visible').text() === 'Cancel';
-        }, 'the cancel button of the item create dialog to appear');
-        girderTest.waitForDialog();
-
-        runs(function () {
-            $('#g-name').val('Test Item Name');
-            $('#item-description-write .g-markdown-text').val('Test Item Description');
-            $('.g-save-item').click();
-        });
-
-        waitsFor(function () {
-            return $('a.g-item-list-link:contains(Test Item Name)').length === 1;
-        }, 'the new item to appear in the list');
-        girderTest.waitForLoad();
-
-        runs(function () {
-            $('a.g-item-list-link:contains(Test Item Name)').click();
-        });
-
-        waitsFor(function () {
-            return $('.g-item-name:contains(Test Item Name)').length === 1;
-        }, 'the item page to load');
-
-        runs(function () {
-            expect($('.g-item-name').text()).toBe("Test Item Name");
-            expect($('.g-item-description').text().trim()).toBe("Test Item Description");
-        });
+    it('create an item in the private folder of the user', function () {
+        _addItemToFolder('Private');
     });
 
     it('Open edit dialog and check url state', function () {
@@ -165,13 +188,17 @@ describe('Test item creation, editing, and deletion', function () {
     it('Edit files', function () {
         var fileId1;
 
-        runs(function() {
+        runs(function () {
             var id = window.location.hash.split('/')[1].split('?')[0];
             /* Create a link file */
             girder.rest.restRequest({
-                path: 'file', type: 'POST',
-                data: {parentType: 'item', parentId: id, name: 'File 1',
-                       linkUrl: 'http://nowhere.com/file1'
+                url: 'file',
+                method: 'POST',
+                data: {
+                    parentType: 'item',
+                    parentId: id,
+                    name: 'File 1',
+                    linkUrl: 'http://nowhere.com/file1'
                 },
                 async: false
             });
@@ -189,7 +216,7 @@ describe('Test item creation, editing, and deletion', function () {
         girderTest.waitForDialog();
 
         runs(function () {
-            _prepareTestUpload();
+            girderTest._prepareTestUpload();
             girderTest._uploadDataExtra = 0;
             girderTest.sendFile('clients/web/test/testFile.txt');
         });
@@ -215,7 +242,7 @@ describe('Test item creation, editing, and deletion', function () {
         waitsFor(function () {
             return $('.g-file-list-entry .g-update-info').length === 2;
         }, 'the files to be listed');
-        runs(function() {
+        runs(function () {
             $('.g-file-list-entry .g-update-info').eq(0).click();
         });
         waitsFor(function () {
@@ -246,7 +273,7 @@ describe('Test item creation, editing, and deletion', function () {
         waitsFor(function () {
             return $('.g-file-list-entry .g-update-info').length === 2;
         }, 'the files to be listed');
-        runs(function() {
+        runs(function () {
             $('.g-file-list-entry .g-update-info').eq(1).click();
         });
         waitsFor(function () {

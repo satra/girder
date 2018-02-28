@@ -31,22 +31,35 @@ import six
 import sys
 import unittest
 import uuid
+import warnings
 
 from six import BytesIO
 from six.moves import urllib
 from girder.utility import model_importer, plugin_utilities
+from girder.utility._cache import cache, requestCache
 from girder.utility.server import setup as setupServer
 from girder.constants import AccessType, ROOT_DIR, SettingKey
 from girder.models import getDbConnection
+from girder.models.model_base import _modelSingletons
+from girder.models.assetstore import Assetstore
+from girder.models.file import File
+from girder.models.setting import Setting
+from girder.models.token import Token
+from girder.api.rest import setContentDisposition
 from . import mock_smtp
 from . import mock_s3
 from . import mongo_replicaset
+
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', 'setup_database.*')
+    from . import setup_database
 
 local = cherrypy.lib.httputil.Host('127.0.0.1', 30000)
 remote = cherrypy.lib.httputil.Host('127.0.0.1', 30001)
 mockSmtp = mock_smtp.MockSmtpReceiver()
 mockS3Server = None
 enabledPlugins = []
+usedDBs = {}
 
 
 def startServer(mock=True, mockS3=False):
@@ -54,6 +67,10 @@ def startServer(mock=True, mockS3=False):
     Test cases that communicate with the server should call this
     function in their setUpModule() function.
     """
+    # If the server starts, a database will exist and we can remove it later
+    dbName = cherrypy.config['database']['uri'].split('/')[-1]
+    usedDBs[dbName] = True
+
     server = setupServer(test=True, plugins=enabledPlugins)
 
     if mock:
@@ -71,6 +88,9 @@ def startServer(mock=True, mockS3=False):
         logHandler.setLevel(logging.DEBUG)
         cherrypy.log.error_log.addHandler(logHandler)
 
+    # Tell CherryPy to throw exceptions in request handling code
+    cherrypy.config.update({'request.throw_errors': True})
+
     mockSmtp.start()
     if mockS3:
         global mockS3Server
@@ -86,6 +106,18 @@ def stopServer():
     """
     cherrypy.engine.exit()
     mockSmtp.stop()
+    dropAllTestDatabases()
+
+
+def dropAllTestDatabases():
+    """
+    Unless otherwise requested, drop all test databases.
+    """
+    if 'keepdb' not in os.environ.get('EXTRADEBUG', '').split():
+        db_connection = getDbConnection()
+        for dbName in usedDBs:
+            db_connection.drop_database(dbName)
+        usedDBs.clear()
 
 
 def dropTestDatabase(dropModels=True):
@@ -99,10 +131,14 @@ def dropTestDatabase(dropModels=True):
 
     if 'girder_test_' not in dbName:
         raise Exception('Expected a testing database name, but got %s' % dbName)
-    db_connection.drop_database(dbName)
-
+    if dbName in db_connection.database_names():
+        if dbName not in usedDBs and 'newdb' in os.environ.get('EXTRADEBUG', '').split():
+            raise Exception('Warning: database %s already exists' % dbName)
+        db_connection.drop_database(dbName)
+    usedDBs[dbName] = True
     if dropModels:
-        model_importer.reinitializeAll()
+        for model in _modelSingletons:
+            model.reconnect()
 
 
 def dropGridFSDatabase(dbName):
@@ -111,7 +147,11 @@ def dropGridFSDatabase(dbName):
     :param dbName: the name of the database to drop.
     """
     db_connection = getDbConnection()
-    db_connection.drop_database(dbName)
+    if dbName in db_connection.database_names():
+        if dbName not in usedDBs and 'newdb' in os.environ.get('EXTRADEBUG', '').split():
+            raise Exception('Warning: database %s already exists' % dbName)
+        db_connection.drop_database(dbName)
+    usedDBs[dbName] = True
 
 
 def dropFsAssetstore(path):
@@ -154,8 +194,10 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         We want to start with a clean database each time, so we drop the test
         database before each test. We then add an assetstore so the file model
         can be used without 500 errors.
-        :param assetstoreType: if 'gridfs' or 's3', use that assetstore.  For
-                               any other value, use a filesystem assetstore.
+        :param assetstoreType: if 'gridfs' or 's3', use that assetstore.
+            'gridfsrs' uses a GridFS assetstore with a replicaset, and
+            'gridfsshard' one with a sharding server.  For any other value, use
+            a filesystem assetstore.
         """
         self.assetstoreType = assetstoreType
         dropTestDatabase(dropModels=dropModels)
@@ -167,38 +209,52 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             # within test methods
             gridfsDbName = 'girder_test_%s_assetstore_auto' % assetstoreName
             dropGridFSDatabase(gridfsDbName)
-            self.assetstore = self.model('assetstore'). \
-                createGridFsAssetstore(name='Test', db=gridfsDbName)
+            self.assetstore = Assetstore().createGridFsAssetstore(name='Test', db=gridfsDbName)
         elif assetstoreType == 'gridfsrs':
             gridfsDbName = 'girder_test_%s_rs_assetstore_auto' % assetstoreName
-            mongo_replicaset.startMongoReplicaSet()
-            self.assetstore = self.model('assetstore'). \
-                createGridFsAssetstore(
+            self.replicaSetConfig = mongo_replicaset.makeConfig()
+            mongo_replicaset.startMongoReplicaSet(self.replicaSetConfig)
+            self.assetstore = Assetstore().createGridFsAssetstore(
                 name='Test', db=gridfsDbName,
                 mongohost='mongodb://127.0.0.1:27070,127.0.0.1:27071,'
                 '127.0.0.1:27072', replicaset='replicaset')
+        elif assetstoreType == 'gridfsshard':
+            gridfsDbName = 'girder_test_%s_shard_assetstore_auto' % assetstoreName
+            self.replicaSetConfig = mongo_replicaset.makeConfig(
+                port=27073, shard=True, sharddb=None)
+            mongo_replicaset.startMongoReplicaSet(self.replicaSetConfig)
+            self.assetstore = Assetstore().createGridFsAssetstore(
+                name='Test', db=gridfsDbName,
+                mongohost='mongodb://127.0.0.1:27073', shard='auto')
         elif assetstoreType == 's3':
-            self.assetstore = self.model('assetstore'). \
-                createS3Assetstore(name='Test', bucket='bucketname',
-                                   accessKeyId='test', secret='test',
-                                   service=mockS3Server.service)
+            self.assetstore = Assetstore().createS3Assetstore(
+                name='Test', bucket='bucketname', accessKeyId='test',
+                secret='test', service=mockS3Server.service)
         else:
             dropFsAssetstore(assetstorePath)
-            self.assetstore = self.model('assetstore'). \
-                createFilesystemAssetstore(name='Test', root=assetstorePath)
+            self.assetstore = Assetstore().createFilesystemAssetstore(
+                name='Test', root=assetstorePath)
 
         addr = ':'.join(map(str, mockSmtp.address or ('localhost', 25)))
-        self.model('setting').set(SettingKey.SMTP_HOST, addr)
-        self.model('setting').set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
-        self.model('setting').set(SettingKey.PLUGINS_ENABLED, enabledPlugins)
+        settings = Setting()
+        settings.set(SettingKey.SMTP_HOST, addr)
+        settings.set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
+        settings.set(SettingKey.PLUGINS_ENABLED, enabledPlugins)
+
+        if os.environ.get('GIRDER_TEST_DATABASE_CONFIG'):
+            setup_database.main(os.environ['GIRDER_TEST_DATABASE_CONFIG'])
 
     def tearDown(self):
         """
         Stop any services that we started just for this test.
         """
         # If "self.setUp" is overridden, "self.assetstoreType" may not be set
-        if getattr(self, 'assetstoreType', None) == 'gridfsrs':
-            mongo_replicaset.stopMongoReplicaSet()
+        if getattr(self, 'assetstoreType', None) in ('gridfsrs', 'gridfsshard'):
+            mongo_replicaset.stopMongoReplicaSet(self.replicaSetConfig)
+
+        # Invalidate cache regions which persist across tests
+        cache.invalidate()
+        requestCache.invalidate()
 
     def mockPluginDir(self, path):
         self._oldPluginDirFn = mockPluginDir(path)
@@ -232,8 +288,30 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
                 msg += ' Response body was:\n%s' % json.dumps(
                     response.json, sort_keys=True, indent=4,
                     separators=(',', ': '))
+            else:
+                msg += 'Response body was:\n%s' % self.getBody(response)
 
             self.fail(msg)
+
+    def assertDictContains(self, expected, actual, msg=''):
+        """
+        Assert that an object is a subset of another.
+
+        This test will fail under the following conditions:
+
+            1. ``actual`` is not a dictionary.
+            2. ``expected`` contains a key not in ``actual``.
+            3. for any key in ``expected``, ``expected[key] != actual[key]``
+
+        :param test: The expected key/value pairs
+        :param actual: The actual object
+        :param msg: An optional message to include with test failures
+        """
+        self.assertIsInstance(actual, dict, msg + ' does not exist')
+        for k, v in six.iteritems(expected):
+            if k not in actual:
+                self.fail('%s expected key "%s"' % (msg, k))
+            self.assertEqual(v, actual[k])
 
     def assertHasKeys(self, obj, keys):
         """
@@ -310,8 +388,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         :param param: The name of the missing parameter.
         :type param: str
         """
-        self.assertEqual("Parameter '%s' is required." % param,
-                         response.json.get('message', ''))
+        self.assertEqual('Parameter "%s" is required.' % param, response.json.get('message', ''))
         self.assertStatus(response, 400)
 
     def getSseMessages(self, resp):
@@ -364,10 +441,9 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         self.assertEqual(file['size'], len(contents))
         self.assertEqual(file['mimeType'], mimeType)
 
-        return self.model('file').load(file['_id'], force=True)
+        return File().load(file['_id'], force=True)
 
-    def ensureRequiredParams(self, path='/', method='GET', required=(),
-                             user=None):
+    def ensureRequiredParams(self, path='/', method='GET', required=(), user=None):
         """
         Ensure that a set of parameters is required by the endpoint.
 
@@ -378,15 +454,15 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         """
         for exclude in required:
             params = dict.fromkeys([p for p in required if p != exclude], '')
-            resp = self.request(path=path, method=method, params=params,
-                                user=user)
+            resp = self.request(path=path, method=method, params=params, user=user)
             self.assertMissingParameter(resp, exclude)
 
     def _genToken(self, user):
         """
         Helper method for creating an authentication token for the user.
         """
-        token = self.model('token').createToken(user)
+
+        token = Token().createToken(user)
         return str(token['_id'])
 
     def _buildHeaders(self, headers, cookie, user, token, basicAuth,
@@ -439,29 +515,36 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         :type appPrefix: str
         :returns: The cherrypy response object from the request.
         """
-        if not params:
-            params = {}
-
         headers = [('Host', '127.0.0.1'), ('Accept', 'application/json')]
         qs = fd = None
 
         if additionalHeaders:
             headers.extend(additionalHeaders)
-        if method in ['POST', 'PUT', 'PATCH'] or body:
-            if isinstance(body, six.string_types):
-                body = body.encode('utf8')
-            qs = urllib.parse.urlencode(params).encode('utf8')
-            if type is None:
-                headers.append(('Content-Type',
-                                'application/x-www-form-urlencoded'))
-            else:
-                headers.append(('Content-Type', type))
+
+        if isinstance(body, six.text_type):
+            body = body.encode('utf8')
+
+        if params:
+            # Python2 can't urlencode unicode and this does no harm in Python3
+            qs = urllib.parse.urlencode({
+                k: v.encode('utf8') if isinstance(v, six.text_type) else v
+                for k, v in params.items()})
+
+        if params and body:
+            # In this case, we are forced to send params in query string
+            fd = BytesIO(body)
+            headers.append(('Content-Type', type))
+            headers.append(('Content-Length', '%d' % len(body)))
+        elif method in ['POST', 'PUT', 'PATCH'] or body:
+            if type:
                 qs = body
-            headers.append(('Content-Length', '%d' % len(qs)))
-            fd = BytesIO(qs)
+            elif params:
+                qs = qs.encode('utf8')
+
+            headers.append(('Content-Type', type or 'application/x-www-form-urlencoded'))
+            headers.append(('Content-Length', '%d' % len(qs or b'')))
+            fd = BytesIO(qs or b'')
             qs = None
-        elif params:
-            qs = urllib.parse.urlencode(params)
 
         app = cherrypy.tree.apps[appPrefix]
         request, response = app.get_serving(
@@ -482,9 +565,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             body = self.getBody(response)
             try:
                 response.json = json.loads(body)
-            except Exception:
-                print(url)
-                print(body)
+            except ValueError:
                 raise AssertionError('Did not receive JSON response')
 
         if not exception and response.output_status.startswith(b'500'):
@@ -558,8 +639,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             body = self.getBody(response)
             try:
                 response.json = json.loads(body)
-            except Exception:
-                print(body)
+            except ValueError:
                 raise AssertionError('Did not receive JSON response')
 
         if response.output_status.startswith(b'500'):
@@ -578,8 +658,7 @@ class MultipartFormdataEncoder(object):
     """
     def __init__(self):
         self.boundary = uuid.uuid4().hex
-        self.contentType = \
-            'multipart/form-data; boundary=%s' % self.boundary
+        self.contentType = 'multipart/form-data; boundary=%s' % self.boundary
 
     @classmethod
     def u(cls, s):
@@ -605,8 +684,8 @@ class MultipartFormdataEncoder(object):
             key = self.u(key)
             filename = self.u(filename)
             yield encoder('--%s\r\n' % self.boundary)
-            yield encoder(self.u('Content-Disposition: form-data; name="%s";'
-                          ' filename="%s"\r\n' % (key, filename)))
+            disposition = setContentDisposition(filename, 'form-data; name="%s"' % key, False)
+            yield encoder(self.u('Content-Disposition: ') + self.u(disposition))
             yield encoder('Content-Type: application/octet-stream\r\n')
             yield encoder('\r\n')
 
@@ -632,3 +711,7 @@ def _sigintHandler(*args):
 
 
 signal.signal(signal.SIGINT, _sigintHandler)
+# If we insist on test databases not existing when we start, make sure we
+# check right away.
+if 'newdb' in os.environ.get('EXTRADEBUG', '').split():
+    dropTestDatabase(False)

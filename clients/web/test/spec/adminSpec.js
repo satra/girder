@@ -1,8 +1,3 @@
-/* globals girderTest, runs, waitsFor, expect, describe, it, beforeEach, spyOn */
-
-/**
- * Start the girder backbone app.
- */
 girderTest.startApp();
 
 describe('Create an admin and non-admin user', function () {
@@ -12,10 +7,10 @@ describe('Create an admin and non-admin user', function () {
 
     it('register a user (first is admin)',
         girderTest.createUser('admin',
-                              'admin@email.com',
-                              'Admin',
-                              'Admin',
-                              'adminpassword!'));
+            'admin@email.com',
+            'Admin',
+            'Admin',
+            'adminpassword!'));
 
     it('Admin console should show when admin is logged in', function () {
         expect($('.g-global-nav-li span').text()).toContain('Admin console');
@@ -33,14 +28,19 @@ describe('Create an admin and non-admin user', function () {
 
     it('register a (normal user)',
         girderTest.createUser('johndoe',
-                              'john.doe@email.com',
-                              'John',
-                              'Doe',
-                              'password!'));
+            'john.doe@email.com',
+            'John',
+            'Doe',
+            'password!'));
 
     it('No admin console when logging in as a normal user', function () {
         expect($('.g-global-nav-li span').text()).not.toContain('Admin console');
     });
+
+    it('go to groups page', girderTest.goToGroupsPage());
+
+    it('Create a public group',
+        girderTest.createGroup('pubGroup', 'public group', true));
 });
 
 describe('Test the settings page', function () {
@@ -53,7 +53,7 @@ describe('Test the settings page', function () {
     it('Login as admin', girderTest.login('admin', 'Admin', 'Admin', 'adminpassword!'));
     it('Go to settings page', function () {
         runs(function () {
-            $("a.g-nav-link[g-target='admin']").click();
+            $('a.g-nav-link[g-target="admin"]').click();
         });
 
         waitsFor(function () {
@@ -75,9 +75,11 @@ describe('Test the settings page', function () {
         expect($('#g-core-cookie-lifetime').val()).toBe('');
         expect($('#g-core-smtp-host').val()).toMatch(/^localhost:31/);
         expect($('#g-core-email-from-address').val()).toBe('');
+        expect($('#g-core-brand-name').val()).toBe('');
+        expect($('#g-core-contact-email-address').val()).toBe('');
         expect($('#g-core-registration-policy').val()).toBe('open');
         expect($('#g-core-upload-minimum-chunk-size').val()).toBe('');
-        expect($.parseJSON($('#g-core-collection-create-policy').val())).toEqual({
+        expect(JSON.parse($('#g-core-collection-create-policy').val())).toEqual({
             open: false,
             users: [],
             groups: []
@@ -98,8 +100,30 @@ describe('Test the settings page', function () {
         waitsFor(function () {
             return $('#g-settings-error-message').text() === '';
         }, 'error message to be cleared');
+        runs(function () {
+            $('#g-core-brand-name').val('fooBar');
+            $('.g-submit-settings').click();
+        });
+        waitsFor(function () {
+            return $('#g-core-brand-name').val() === 'fooBar';
+        }, 'brand name to change');
+        runs(function () {
+            $('#g-core-contact-email-address').val('foo@foo.com');
+            $('.g-submit-settings').click();
+        });
+        waitsFor(function () {
+            return $('#g-core-contact-email-address').val() === 'foo@foo.com';
+        }, 'contact email address to change');
     });
     it('Use search to update collection create policy', function () {
+        runs(function () {
+            $('.g-collection-create-policy-container .g-plugin-switch').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container .g-grant-access-container').length > 0;
+        }, 'access widget to load');
+
         runs(function () {
             $('.g-collection-create-policy-container .g-search-field').val('admin')
                 .trigger('input');
@@ -107,15 +131,51 @@ describe('Test the settings page', function () {
 
         waitsFor(function () {
             return $('.g-collection-create-policy-container .g-search-result').length > 0;
-        }, 'search result to appear');
+        }, 'search result to appear for a user');
 
         runs(function () {
-            $('.g-collection-create-policy-container .g-search-result>a').click();
+            $('.g-collection-create-policy-container .g-search-result-element').click();
         });
 
         waitsFor(function () {
-            return JSON.parse($('#g-core-collection-create-policy').val()).users.length === 1;
-        }, 'policy value to update');
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users').children().length === 1;
+        }, 'access list to populate with one user');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-search-field').val('pubGroup').trigger('input');
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .g-search-result .icon-users').length > 0;
+        }, 'search result to appear for a group');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-search-result-element').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-groups').children().length === 1;
+        }, 'access list to populate with one group');
+
+        runs(function () {
+            $('.g-submit-settings').click();
+        });
+
+        runs(function () {
+            $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users .g-user-access-entry .icon-cancel').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container #g-ac-list-users').children().length === 0;
+        }, 'policy value to be cleared');
+
+        runs(function () {
+            $('.g-collection-create-policy-container .g-plugin-switch').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-collection-create-policy-container .access-widget-container .g-grant-access-container').length === 0;
+        }, 'access widget unload');
     });
 
     it('logout and check for redirect to front page from settings page', function () {
@@ -146,7 +206,7 @@ describe('Test the assetstore page', function () {
         it('Create, switch to, and delete a ' + assetstore + ' assetstore', function () {
             /* create the assetstore */
             runs(function () {
-                $("[data-target='#" + tab + "']").click();
+                $('[data-target="#' + tab + '"]').click();
             });
             waitsFor(function () {
                 return $('#' + tab + ' .g-new-assetstore-submit:visible').length > 0;
@@ -167,7 +227,11 @@ describe('Test the assetstore page', function () {
                     if (value === 'service') {
                         value = service;
                     }
-                    $('input#' + key).val(value);
+                    if ($('input#' + key).is(':checkbox')) {
+                        $('input#' + key).attr('checked', value);
+                    } else {
+                        $('input#' + key).val(value);
+                    }
                 }
             });
             waitsFor(function () {
@@ -240,7 +304,7 @@ describe('Test the assetstore page', function () {
 
             /* navigate away and back */
             runs(function () {
-                $("a.g-nav-link[g-target='admin']").click();
+                $('a.g-nav-link[g-target="admin"]').click();
             });
             waitsFor(function () {
                 return $('.g-assetstore-config').length > 0;
@@ -254,7 +318,7 @@ describe('Test the assetstore page', function () {
 
             if (callback) {
                 runs(function () {
-                    callback({
+                    callback({ // eslint-disable-line standard/no-callback-literal
                         name: name
                     });
                 });
@@ -409,39 +473,8 @@ describe('Test the assetstore page', function () {
         });
 
         waitsFor(function () {
-            return $('.g-folder-list-entry').text().indexOf('prefix') !== -1;
+            return $('.g-empty-parent-message').length > 0;
         }, 'user folders to show');
-
-        runs(function () {
-            _.each($('.g-folder-list-link'), function (link) {
-                if ($(link).text() === 'prefix') {
-                    $(link).click();
-                }
-            });
-        });
-
-        waitsFor(function () {
-            return $('.g-item-list-link').text().indexOf('test') !== -1;
-        }, 'item to appear in the hierarchy widget');
-
-        runs(function () {
-            $('.g-item-list-link').click();
-        });
-
-        waitsFor(function () {
-            return $('.g-file-list-link').length === 1;
-        }, 'item page to render');
-
-        // Delete the containing folder so we can delete the assetstore
-        runs(function () {
-            privateFolder.on('g:deleted', function () {
-                privateFolder = null;
-            }).destroy();
-        });
-
-        waitsFor(function () {
-            return privateFolder === null;
-        }, 'private folder to be deleted');
 
         runs(function () {
             window.location = '#assetstores';
@@ -460,11 +493,11 @@ describe('Test the assetstore page', function () {
         girderTest.login('admin', 'Admin', 'Admin', 'adminpassword!')();
 
         runs(function () {
-            $("a.g-nav-link[g-target='admin']").click();
+            $('a.g-nav-link[g-target="admin"]').click();
         });
 
         runs(function () {
-            $("a.g-nav-link[g-target='admin']").click();
+            $('a.g-nav-link[g-target="admin"]').click();
         });
 
         waitsFor(function () {
@@ -492,21 +525,24 @@ describe('Test the assetstore page', function () {
         'g-new-fs-root': '/tmp/assetstore'
     }, _testFilesystemImport);
 
-    _testAssetstore('gridfs', 'g-create-gridfs-tab',
-                    {'g-new-gridfs-name': 'name',
-                     'g-new-gridfs-db': 'girder_webclient_gridfs'});
+    _testAssetstore('gridfs', 'g-create-gridfs-tab', {
+        'g-new-gridfs-name': 'name',
+        'g-new-gridfs-db': 'girder_webclient_gridfs'
+    });
 
     /* The specified assetstore should NOT exist, and the specified mongohost
      * should NOT be present (nothing should respond on those ports). */
-    _testAssetstore('gridfs-rs', 'g-create-gridfs-tab',
-                    {'g-new-gridfs-name': 'name',
-                     'g-new-gridfs-db': 'girder_webclient_gridfsrs',
-                     'g-new-gridfs-mongohost': 'mongodb://127.0.0.2:27080,' +
-                        '127.0.0.2:27081,127.0.0.2:27082',
-                     'g-new-gridfs-replicaset': 'replicaset'}, null, function () {
-                         return $('.g-validation-failed-message:contains(' +
-                              '"Could not connect to the database: ")').length === 1;
-                     }, 'validation failure to display', true);
+    _testAssetstore('gridfs-rs', 'g-create-gridfs-tab', {
+        'g-new-gridfs-name': 'name',
+        'g-new-gridfs-db': 'girder_webclient_gridfsrs',
+        'g-new-gridfs-mongohost': 'mongodb://127.0.0.2:27080,127.0.0.2:27081,' +
+                                  '127.0.0.2:27082/?serverSelectionTimeoutMS=250',
+        'g-new-gridfs-replicaset': 'replicaset',
+        'g-new-gridfs-shard-auto': false
+    }, null, function () {
+        return $('.g-validation-failed-message:contains(' +
+                 '"Could not connect to the database: ")').length === 1;
+    }, 'validation failure to display', true);
 
     _testAssetstore('s3', 'g-create-s3-tab', {
         'g-new-s3-name': 'name',
@@ -529,11 +565,18 @@ describe('Test the assetstore page', function () {
 describe('Test the plugins page', function () {
     beforeEach(function () {
         spyOn(girder.server.restartServer, '_callSystemRestart').andCallFake(function () {
+            var restartResolution = $.Deferred();
             window.setTimeout(function () {
                 girder.server.restartServer._lastStartDate = 0;
+                restartResolution.resolve();
             }, 100);
+            return restartResolution.promise();
         });
         spyOn(girder.server.restartServer, '_reloadWindow');
+        // We don't want to really rebuild the web code, so replace the original one with a resolved Promise
+        spyOn(girder.server.rebuildWebClient, '_rebuildWebClient').andCallFake(function () {
+            return $.Deferred().resolve().promise();
+        });
     });
 
     it('Test that anonymous loading plugins page prompts login', function () {
@@ -543,7 +586,7 @@ describe('Test the plugins page', function () {
     it('Login as admin', girderTest.login('admin', 'Admin', 'Admin', 'adminpassword!'));
     it('Go to plugins page', function () {
         runs(function () {
-            $("a.g-nav-link[g-target='admin']").click();
+            $('a.g-nav-link[g-target="admin"]').click();
         });
         waitsFor(function () {
             return $('.g-plugins-config').length > 0;
@@ -559,6 +602,17 @@ describe('Test the plugins page', function () {
         }, 'plugins page to load');
         girderTest.waitForLoad();
     });
+    it('Check that an error indicator is displayed for an enabled plugin that failed to load', function () {
+        var target = $('.g-plugin-list-item:contains(bad_server)');
+        expect(target.length).toBe(1);
+        expect(target.find('input[type=checkbox]:checked').length).toBe(1);
+        expect(target.hasClass('g-plugin-list-item-failed')).toBe(true);
+        expect(target.find('.g-plugin-list-item-failed-notice').length).toBe(1);
+
+        var content = target.find('.g-plugin-list-item-failed-notice').data('content');
+        expect(content).toContain('Traceback');
+        expect(content).toContain('Exception: Bad server');
+    });
     it('Enable a plugin with non-existent dependencies', function () {
         runs(function () {
             var target = $('.g-plugin-list-item:contains(has_nonexistent_deps)');
@@ -568,22 +622,23 @@ describe('Test the plugins page', function () {
 
             target.find('.g-plugin-switch').click();
 
-            expect($('.g-plugin-restart').css('visibility')).toBe('hidden');
+            expect($('.g-plugin-rebuild-restart-text').css('visibility')).toBe('hidden');
         });
     });
     it('Enable a plugin', function () {
         runs(function () {
             expect($('.g-plugin-list-item .bootstrap-switch').length > 0).toBe(true);
-            expect($('.g-plugin-restart').css('visibility')).toBe('hidden');
-            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(0);
+            expect($('.g-plugin-rebuild-restart-text').css('visibility')).toBe('hidden');
+            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(1);
             $('.g-plugin-list-item:contains(test_plugin) .g-plugin-switch').click();
         });
         waitsFor(function () {
-            return $('.g-plugin-restart').css('visibility') !== 'hidden';
-        }, 'restart option to be shown');
+            return $('.g-plugin-rebuild-restart-text').css('visibility') === 'visible' &&
+                $('.g-rebuild-and-restart').hasClass('btn-danger');
+        }, 'rebuild and restart change color and restart messsage to be shown');
         runs(function () {
-            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(1);
-            $('.g-plugin-restart-button').click();
+            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(2);
+            $('.g-rebuild-and-restart').click();
         });
         waitsFor(function () {
             return $('#g-confirm-button:visible').length > 0;
@@ -598,7 +653,7 @@ describe('Test the plugins page', function () {
     });
     it('Go away and back to plugins page', function () {
         runs(function () {
-            $("a.g-nav-link[g-target='admin']").click();
+            $('a.g-nav-link[g-target="admin"]').click();
         });
         waitsFor(function () {
             return $('.g-plugins-config').length > 0;
@@ -619,16 +674,16 @@ describe('Test the plugins page', function () {
             $('.g-plugin-list-item:contains(test_plugin) .g-plugin-switch').click();
         });
         runs(function () {
-            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(0);
+            expect($('.g-plugin-list-item input[type=checkbox]:checked').length).toBe(1);
         });
         waitsFor(function () {
             var resp = girder.rest.restRequest({
-                path: 'system/plugins',
-                type: 'GET',
+                url: 'system/plugins',
+                method: 'GET',
                 async: false
             });
             return (resp && resp.responseJSON && resp.responseJSON.enabled &&
-                resp.responseJSON.enabled.length === 0);
+                resp.responseJSON.enabled.length === 1);
         });
     });
     /* Logout to make sure we don't see the plugins any more */

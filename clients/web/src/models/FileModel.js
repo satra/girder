@@ -4,6 +4,7 @@ import FolderModel from 'girder/models/FolderModel';
 import ItemModel from 'girder/models/ItemModel';
 import Model from 'girder/models/Model';
 import { restRequest, uploadHandlers, getUploadChunkSize } from 'girder/rest';
+import 'girder/utilities/S3UploadHandler'; // imported for side effect
 
 var FileModel = Model.extend({
     resourceName: 'file',
@@ -34,8 +35,8 @@ var FileModel = Model.extend({
         data = this._wrapData(data);
 
         this.upload(null, data, {
-            path: 'file/' + this.get('_id') + '/contents',
-            type: 'PUT',
+            url: `file/${this.id}/contents`,
+            method: 'PUT',
             data: {
                 size: data.size
             }
@@ -99,8 +100,8 @@ var FileModel = Model.extend({
         this.resumeInfo = null;
         this.uploadHandler = null;
         _restParams = _restParams || {
-            path: 'file',
-            type: 'POST',
+            url: 'file',
+            method: 'POST',
             data: _.extend({
                 parentType: parentModel.resourceName,
                 parentId: parentModel.get('_id'),
@@ -111,7 +112,7 @@ var FileModel = Model.extend({
         };
 
         // Authenticate and generate the upload token for this file
-        restRequest(_restParams).done(_.bind(function (upload) {
+        restRequest(_restParams).done((upload) => {
             var behavior = upload.behavior;
             if (behavior && uploadHandlers[behavior]) {
                 this.uploadHandler = new uploadHandlers[behavior]({
@@ -154,7 +155,7 @@ var FileModel = Model.extend({
                 this.set(upload);
                 this.trigger('g:upload.complete');
             }
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             var text = 'Error: ', identifier;
 
             if (resp.status === 0) {
@@ -168,7 +169,7 @@ var FileModel = Model.extend({
                 identifier: identifier,
                 response: resp
             });
-        }, this));
+        });
     },
 
     /**
@@ -182,16 +183,16 @@ var FileModel = Model.extend({
 
         // Request the actual offset we need to resume at
         restRequest({
-            path: 'file/offset',
-            type: 'GET',
+            url: 'file/offset',
+            method: 'GET',
             data: {
                 uploadId: this.resumeInfo.uploadId
             },
             error: null
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.startByte = resp.offset;
             this._uploadChunk(this.resumeInfo.file, this.resumeInfo.uploadId);
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             var msg;
 
             if (resp.status === 0) {
@@ -203,7 +204,7 @@ var FileModel = Model.extend({
                 message: msg,
                 response: resp
             });
-        }, this));
+        });
     },
 
     abortUpload: function () {
@@ -211,8 +212,8 @@ var FileModel = Model.extend({
             return;
         }
         restRequest({
-            path: 'system/uploads',
-            type: 'DELETE',
+            url: 'system/uploads',
+            method: 'DELETE',
             data: {
                 uploadId: this.resumeInfo.uploadId
             },
@@ -227,36 +228,29 @@ var FileModel = Model.extend({
         this.chunkLength = endByte - this.startByte;
         var sliceFn = file.webkitSlice ? 'webkitSlice' : 'slice';
         var blob = file[sliceFn](this.startByte, endByte);
-        var model = this;
-
-        var fd = new FormData();
-        fd.append('offset', this.startByte);
-        fd.append('uploadId', uploadId);
-        fd.append('chunk', blob);
 
         restRequest({
-            path: 'file/chunk',
-            type: 'POST',
-            dataType: 'json',
-            data: fd,
+            url: `file/chunk?offset=${this.startByte}&uploadId=${uploadId}`,
+            method: 'POST',
+            data: blob,
             contentType: false,
             processData: false,
-            success: function (resp) {
-                model.trigger('g:upload.chunkSent', {
-                    bytes: endByte - model.startByte
+            success: (resp) => {
+                this.trigger('g:upload.chunkSent', {
+                    bytes: endByte - this.startByte
                 });
 
                 if (endByte === file.size) {
-                    model.startByte = 0;
-                    model.resumeInfo = null;
-                    model.set(resp);
-                    model.trigger('g:upload.complete');
+                    this.startByte = 0;
+                    this.resumeInfo = null;
+                    this.set(resp);
+                    this.trigger('g:upload.complete');
                 } else {
-                    model.startByte = endByte;
-                    model._uploadChunk(file, uploadId);
+                    this.startByte = endByte;
+                    this._uploadChunk(file, uploadId);
                 }
             },
-            error: function (resp) {
+            error: (resp) => {
                 var text = 'Error: ', identifier;
 
                 if (resp.status === 0) {
@@ -266,22 +260,22 @@ var FileModel = Model.extend({
                     identifier = resp.responseJSON.identifier;
                 }
 
-                model.resumeInfo = {
+                this.resumeInfo = {
                     uploadId: uploadId,
                     file: file
                 };
 
-                model.trigger('g:upload.error', {
+                this.trigger('g:upload.error', {
                     message: text,
                     identifier: identifier,
                     response: resp
                 });
             },
-            xhr: function () {
+            xhr: () => {
                 // Custom XHR so we can register a progress handler
                 var xhr = new window.XMLHttpRequest();
-                xhr.upload.addEventListener('progress', function (e) {
-                    model._uploadProgress(file, e);
+                xhr.upload.addEventListener('progress', (e) => {
+                    this._uploadProgress(file, e);
                 });
                 return xhr;
             }

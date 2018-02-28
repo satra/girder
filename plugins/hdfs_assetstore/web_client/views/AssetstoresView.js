@@ -1,3 +1,4 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
 import AssetstoresView from 'girder/views/body/AssetstoresView';
@@ -27,8 +28,4 @@ wrap(AssetstoresView, 'render', function (render) {
             })
         );
     }, this);
-
-    this.$('.g-hdfs-import-button').tooltip({
-        delay: 200
-    });
 });

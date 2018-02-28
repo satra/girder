@@ -1,3 +1,4 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
 import ItemModel from 'girder/models/ItemModel';
@@ -13,7 +14,7 @@ wrap(UploadWidget, 'render', function (render) {
     render.call(this);
 
     if (_.has(this.parentView, 'licenses')) {
-        this.selectLicenseWidget = new SelectLicenseWidget({ // eslint-disable-line new-cap
+        this.selectLicenseWidget = new SelectLicenseWidget({
             licenses: this.parentView.licenses,
             parentView: this
         }).render();

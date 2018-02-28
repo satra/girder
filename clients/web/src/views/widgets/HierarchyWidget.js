@@ -19,8 +19,8 @@ import View from 'girder/views/View';
 import { AccessType } from 'girder/constants';
 import { confirm, handleClose } from 'girder/dialog';
 import events from 'girder/events';
-import { getModelClassByName, renderMarkdown, formatCount, capitalize } from 'girder/misc';
-import { restRequest, apiRoot } from 'girder/rest';
+import { getModelClassByName, renderMarkdown, formatCount, capitalize, formatSize } from 'girder/misc';
+import { restRequest, getApiRoot } from 'girder/rest';
 
 import HierarchyBreadcrumbTemplate from 'girder/templates/widgets/hierarchyBreadcrumb.pug';
 import HierarchyWidgetTemplate from 'girder/templates/widgets/hierarchyWidget.pug';
@@ -28,7 +28,6 @@ import HierarchyWidgetTemplate from 'girder/templates/widgets/hierarchyWidget.pu
 import 'girder/stylesheets/widgets/hierarchyWidget.styl';
 
 import 'bootstrap/js/dropdown';
-import 'bootstrap/js/tooltip';
 
 var pickedResources = null;
 
@@ -63,6 +62,8 @@ var HierarchyBreadcrumbView = View.extend({
             current: active,
             descriptionText: descriptionText
         }));
+
+        return this;
     }
 });
 
@@ -73,6 +74,7 @@ var HierarchyWidget = View.extend({
     events: {
         'click a.g-create-subfolder': 'createFolderDialog',
         'click a.g-edit-folder': 'editFolderDialog',
+        'click button.g-select-folder': 'selectFolder',
         'click a.g-delete-folder': 'deleteFolderDialog',
         'click .g-folder-info-button': 'showInfoDialog',
         'click .g-collection-info-button': 'showInfoDialog',
@@ -117,6 +119,9 @@ var HierarchyWidget = View.extend({
 
         this._showActions = _.has(settings, 'showActions') ? settings.showActions : true;
         this._showItems = _.has(settings, 'showItems') ? settings.showItems : true;
+
+        this._itemFilter = settings.itemFilter;
+
         this._checkboxes = _.has(settings, 'checkboxes') ? settings.checkboxes : true;
         this._downloadLinks = _.has(settings, 'downloadLinks') ? settings.downloadLinks : true;
         this._viewLinks = _.has(settings, 'viewLinks') ? settings.viewLinks : true;
@@ -127,6 +132,8 @@ var HierarchyWidget = View.extend({
         this._onItemClick = settings.onItemClick || function (item) {
             router.navigate('item/' + item.get('_id'), {trigger: true});
         };
+
+        this._onFolderSelect = settings.onFolderSelect;
 
         this.folderAccess = settings.folderAccess;
         this.folderCreate = settings.folderCreate;
@@ -154,6 +161,7 @@ var HierarchyWidget = View.extend({
         });
 
         this.folderListView = new FolderListWidget({
+            folderFilter: this._itemFilter,
             parentType: this.parentModel.resourceName,
             parentId: this.parentModel.get('_id'),
             checkboxes: this._checkboxes,
@@ -166,21 +174,16 @@ var HierarchyWidget = View.extend({
                 this.uploadWidget.folder = folder;
             }
         }, this).off('g:checkboxesChanged')
-                .on('g:checkboxesChanged', this.updateChecked, this)
-                .off('g:changed').on('g:changed', function () {
-                    this.folderCount = this.folderListView.collection.length;
-                    this._childCountCheck();
-                }, this);
-
-        if (this.parentModel.resourceName === 'folder') {
-            this._initFolderViewSubwidgets();
-        } else {
-            this.itemCount = 0;
-        }
+            .on('g:checkboxesChanged', this.updateChecked, this)
+            .off('g:changed').on('g:changed', function () {
+                this.folderCount = this.folderListView.collection.length;
+                this._childCountCheck();
+            }, this);
 
         if (this.parentModel.resourceName === 'folder') {
             this._fetchToRoot(this.parentModel);
         } else {
+            this.itemCount = 0;
             this.render();
         }
         events.on('g:login', () => {
@@ -205,27 +208,33 @@ var HierarchyWidget = View.extend({
      * is a folder type.
      */
     _initFolderViewSubwidgets: function () {
-        this.itemListView = new ItemListWidget({
-            folderId: this.parentModel.get('_id'),
-            checkboxes: this._checkboxes,
-            downloadLinks: this._downloadLinks,
-            viewLinks: this._viewLinks,
-            showSizes: this._showSizes,
-            parentView: this
-        });
-        this.itemListView.on('g:itemClicked', this._onItemClick, this)
-            .off('g:checkboxesChanged')
-            .on('g:checkboxesChanged', this.updateChecked, this)
-            .off('g:changed').on('g:changed', function () {
+        if (!this.itemListView) {
+            this.itemListView = new ItemListWidget({
+                itemFilter: this._itemFilter,
+                folderId: this.parentModel.id,
+                public: this.parentModel.get('public'),
+                accessLevel: this.parentModel.getAccessLevel(),
+                checkboxes: this._checkboxes,
+                downloadLinks: this._downloadLinks,
+                viewLinks: this._viewLinks,
+                showSizes: this._showSizes,
+                parentView: this
+            });
+            this.listenTo(this.itemListView, 'g:itemClicked', this._onItemClick);
+            this.listenTo(this.itemListView, 'g:checkboxesChanged', this.updateChecked);
+            this.listenTo(this.itemListView, 'g:changed', () => {
                 this.itemCount = this.itemListView.collection.length;
                 this._childCountCheck();
-            }, this);
+            });
+        }
 
-        this.metadataWidget = new MetadataWidget({
-            item: this.parentModel,
-            parentView: this,
-            accessLevel: this.parentModel.getAccessLevel()
-        });
+        if (!this.metadataWidget) {
+            this.metadataWidget = new MetadataWidget({
+                item: this.parentModel,
+                parentView: this,
+                accessLevel: this.parentModel.getAccessLevel()
+            });
+        }
     },
 
     _setRoute: function () {
@@ -241,25 +250,11 @@ var HierarchyWidget = View.extend({
     },
 
     _fetchToRoot: function (folder) {
-        var parentId = folder.get('parentId');
-        var parentType = folder.get('parentCollection');
-        var modelName = getModelClassByName(parentType);
-        if (allModels[modelName]) {
-            var parent = new allModels[modelName]();
-            parent.set({
-                _id: parentId
-            }).once('g:fetched', function () {
-                this.breadcrumbs.push(parent);
-                if (parentType === 'folder') {
-                    this._fetchToRoot(parent);
-                } else {
-                    this.breadcrumbs.reverse();
-                    this.render();
-                }
-            }, this).fetch();
-        } else {
-            throw new Error('No such model: ' + modelName);
-        }
+        folder.getRootPath().done((path) => {
+            const breadcrumbs = path.map((r) => new allModels[getModelClassByName(r.type)](r.object));
+            this.breadcrumbs.unshift(...breadcrumbs);
+            this.render();
+        });
     },
 
     render: function () {
@@ -271,15 +266,17 @@ var HierarchyWidget = View.extend({
             model: this.parentModel,
             level: this.parentModel.getAccessLevel(),
             AccessType: AccessType,
+            onFolderSelect: this._onFolderSelect,
             showActions: this._showActions,
             showMetadata: this._showMetadata,
             checkboxes: this._checkboxes,
-            capitalize: capitalize
+            capitalize: capitalize,
+            itemFilter: this._itemFilter
         }));
 
         if (this.$('.g-folder-actions-menu>li>a').length === 0) {
             // Disable the actions button if actions list is empty
-            this.$('.g-folder-actions-button').attr('disabled', 'disabled');
+            this.$('.g-folder-actions-button').girderEnable(false);
         }
 
         this.breadcrumbView.setElement(this.$('.g-hierarchy-breadcrumb-bar>ol')).render();
@@ -288,23 +285,14 @@ var HierarchyWidget = View.extend({
         this.folderListView.setElement(this.$('.g-folder-list-container')).render();
 
         if (this.parentModel.resourceName === 'folder' && this._showItems) {
+            this._initFolderViewSubwidgets();
             this.itemListView.setElement(this.$('.g-item-list-container')).render();
             this.metadataWidget.setItem(this.parentModel);
+            this.metadataWidget.accessLevel = this.parentModel.getAccessLevel();
             if (this._showMetadata) {
                 this.metadataWidget.setElement(this.$('.g-folder-metadata')).render();
             }
         }
-
-        this.$('[title]').tooltip({
-            container: this.$el,
-            animation: false,
-            delay: {
-                show: 100
-            },
-            placement: function () {
-                return this.$element.attr('placement') || 'top';
-            }
-        });
 
         if (this.upload) {
             this.uploadDialog();
@@ -337,6 +325,13 @@ var HierarchyWidget = View.extend({
     upOneLevel: function () {
         this.breadcrumbs.pop();
         this.setCurrentModel(this.breadcrumbs[this.breadcrumbs.length - 1]);
+    },
+
+    /**
+     * Called when the "select this folder" link is clicked.
+     */
+    selectFolder: function () {
+        this._onFolderSelect(this.parentModel);
     },
 
     /**
@@ -426,7 +421,7 @@ var HierarchyWidget = View.extend({
                   this.parentModel.escape('name') + '</b>?',
             escapedHtml: true,
             yesText: 'Delete',
-            confirmCallback: _.bind(function () {
+            confirmCallback: () => {
                 this.parentModel.on('g:deleted', function () {
                     if (type === 'collection') {
                         router.navigate('collections', {trigger: true});
@@ -438,8 +433,19 @@ var HierarchyWidget = View.extend({
                     throwError: true,
                     progress: true
                 });
-            }, this)
+            }
         };
+        if (type === 'collection' &&
+           (this.parentModel.get('nFolders') !== 0 || this.parentModel.get('size') !== 0)) {
+            params = _.extend({
+                name: this.parentModel.escape('name'),
+                additionalText: '<b>' + this.parentModel.escape('name') + '</b>' +
+                                ' contains <b>' + this.parentModel.escape('nFolders') +
+                                ' folders</b> taking up <b>' +
+                                formatSize(parseInt(this.model.get('size'), 10)) + '</b>',
+                msgConfirmation: true
+            }, params);
+        }
         confirm(params);
     },
 
@@ -468,15 +474,19 @@ var HierarchyWidget = View.extend({
     fetchAndShowChildCount: function () {
         this.$('.g-child-count-container').addClass('hide');
 
-        var showCounts = _.bind(function () {
+        var showCounts = () => {
+            const folderCount = formatCount(this.parentModel.get('nFolders'));
             this.$('.g-child-count-container').removeClass('hide');
-            this.$('.g-subfolder-count').text(
-                formatCount(this.parentModel.get('nFolders')));
+            this.$('.g-subfolder-count').text(folderCount);
+            const folderTooltip = folderCount === 1 ? `${folderCount} total folder` : `${folderCount} total folders`;
+            this.$('.g-subfolder-count-container').attr('title', folderTooltip);
             if (this.parentModel.has('nItems')) {
-                this.$('.g-item-count').text(
-                    formatCount(this.parentModel.get('nItems')));
+                const itemCount = formatCount(this.parentModel.get('nItems'));
+                this.$('.g-item-count').text(itemCount);
+                const itemTooltip = itemCount === 1 ? `${itemCount} total item` : `${itemCount} total items`;
+                this.$('.g-item-count-container').attr('title', itemTooltip);
             }
-        }, this);
+        };
 
         if (this.parentModel.has('nFolders')) {
             showCounts();
@@ -488,9 +498,9 @@ var HierarchyWidget = View.extend({
         }
 
         this.parentModel.off('change:nItems', showCounts, this)
-                        .on('change:nItems', showCounts, this)
-                        .off('change:nFolders', showCounts, this)
-                        .on('change:nFolders', showCounts, this);
+            .on('change:nItems', showCounts, this)
+            .off('change:nFolders', showCounts, this)
+            .on('change:nFolders', showCounts, this);
 
         return this;
     },
@@ -509,7 +519,8 @@ var HierarchyWidget = View.extend({
         this.folderListView.initialize({
             parentType: parent.resourceName,
             parentId: parent.get('_id'),
-            checkboxes: this._checkboxes
+            checkboxes: this._checkboxes,
+            folderFilter: this._itemFilter
         });
 
         this.updateChecked();
@@ -518,11 +529,16 @@ var HierarchyWidget = View.extend({
             if (this.itemListView) {
                 this.itemListView.initialize({
                     folderId: parent.get('_id'),
-                    checkboxes: this._checkboxes
+                    checkboxes: this._checkboxes,
+                    downloadLinks: this._downloadLinks,
+                    viewLinks: this._viewLinks,
+                    itemFilter: this._itemFilter,
+                    showSizes: this._showSizes,
+                    public: this.parentModel.get('public'),
+                    accessLevel: this.parentModel.getAccessLevel()
                 });
-            } else {
-                this._initFolderViewSubwidgets();
             }
+            this._initFolderViewSubwidgets();
         }
 
         this.render();
@@ -570,7 +586,6 @@ var HierarchyWidget = View.extend({
      * Prompt the user to delete the currently checked items.
      */
     deleteCheckedDialog: function () {
-        var view = this;
         var folders = this.folderListView.checked;
         var items;
         if (this.itemListView && this.itemListView.checked.length) {
@@ -583,25 +598,25 @@ var HierarchyWidget = View.extend({
                   desc + ')?',
 
             yesText: 'Delete',
-            confirmCallback: function () {
-                var resources = view._getCheckedResourceParam();
+            confirmCallback: () => {
+                var resources = this._getCheckedResourceParam();
                 /* Content on DELETE requests is somewhat oddly supported (I
                  * can't get it to work under jasmine/phantom), so override the
                  * method. */
                 restRequest({
-                    path: 'resource',
-                    type: 'POST',
+                    url: 'resource',
+                    method: 'POST',
                     data: {resources: resources, progress: true},
                     headers: {'X-HTTP-Method-Override': 'DELETE'}
-                }).done(function () {
-                    if (items && items.length && view.parentModel.has('nItems')) {
-                        view.parentModel.increment('nItems', -items.length);
+                }).done(() => {
+                    if (items && items.length && this.parentModel.has('nItems')) {
+                        this.parentModel.increment('nItems', -items.length);
                     }
-                    if (folders.length && view.parentModel.has('nFolders')) {
-                        view.parentModel.increment('nFolders', -folders.length);
+                    if (folders.length && this.parentModel.has('nFolders')) {
+                        this.parentModel.increment('nFolders', -folders.length);
                     }
 
-                    view.setCurrentModel(view.parentModel, {setRoute: false});
+                    this.setCurrentModel(this.parentModel, {setRoute: false});
                 });
             }
         };
@@ -657,12 +672,9 @@ var HierarchyWidget = View.extend({
             }
         }
 
-        if (folders.length + items.length) {
-            // Disable folder actions if checkboxes are checked
-            this.$('.g-folder-actions-button').attr('disabled', 'disabled');
-        } else {
-            this.$('.g-folder-actions-button').removeAttr('disabled');
-        }
+        // Disable folder actions if checkboxes are checked
+        let anyChecked = folders.length + items.length > 0;
+        this.$('.g-folder-actions-button').girderEnable(!anyChecked);
 
         this.checkedMenuWidget.update({
             minFolderLevel: minFolderLevel,
@@ -746,7 +758,6 @@ var HierarchyWidget = View.extend({
             _.each(items, function (cid) {
                 var item = this.itemListView.collection.get(cid);
                 resources.item.push(item.id);
-                return true;
             }, this);
         }
         _.each(resources, function (list, key) {
@@ -761,7 +772,7 @@ var HierarchyWidget = View.extend({
     },
 
     downloadChecked: function () {
-        var url = apiRoot + '/resource/download';
+        var url = getApiRoot() + '/resource/download';
         var resources = this._getCheckedResourceParam();
         var data = {resources: resources};
 
@@ -838,18 +849,18 @@ var HierarchyWidget = View.extend({
         var nFolders = (pickedResources.resources.folder || []).length;
         var nItems = (pickedResources.resources.item || []).length;
         restRequest({
-            path: 'resource/move',
-            type: 'PUT',
+            url: 'resource/move',
+            method: 'PUT',
             data: {
                 resources: resources,
                 parentType: this.parentModel.resourceName,
                 parentId: this.parentModel.get('_id'),
                 progress: true
             }
-        }).done(_.bind(function () {
+        }).done(() => {
             this._incrementCounts(nFolders, nItems);
             this.setCurrentModel(this.parentModel, {setRoute: false});
-        }, this));
+        });
         this.clearPickedResources();
     },
 
@@ -861,18 +872,18 @@ var HierarchyWidget = View.extend({
         var nFolders = (pickedResources.resources.folder || []).length;
         var nItems = (pickedResources.resources.item || []).length;
         restRequest({
-            path: 'resource/copy',
-            type: 'POST',
+            url: 'resource/copy',
+            method: 'POST',
             data: {
                 resources: resources,
                 parentType: this.parentModel.resourceName,
                 parentId: this.parentModel.get('_id'),
                 progress: true
             }
-        }).done(_.bind(function () {
+        }).done(() => {
             this._incrementCounts(nFolders, nItems);
             this.setCurrentModel(this.parentModel, {setRoute: false});
-        }, this));
+        });
         this.clearPickedResources();
     },
 
@@ -890,7 +901,7 @@ var HierarchyWidget = View.extend({
     },
 
     redirectViaForm: function (method, url, data) {
-        var form = $('<form action="' + url + '" method="' + method + '"/>');
+        var form = $('<form/>').attr({action: url, method: method});
         _.each(data, function (value, key) {
             form.append($('<input/>').attr({type: 'text', name: key, value: value}));
         });

@@ -1,6 +1,7 @@
 import $ from 'jquery';
 import _ from 'underscore';
 
+import FileCollection from 'girder/collections/FileCollection';
 import FolderModel from 'girder/models/FolderModel';
 import MetadataMixin from 'girder/models/MetadataMixin';
 import Model from 'girder/models/Model';
@@ -26,10 +27,11 @@ var ItemModel = Model.extend({
             callback(this.get('_accessLevel'));
             return this.get('_accessLevel');
         } else {
-            this.parent = new FolderModel();
-            this.parent.set({
+            var parent = new FolderModel();
+            parent.set({
                 _id: this.get('folderId')
             }).once('g:fetched', function () {
+                this.parent = parent;
                 this.set('_accessLevel', this.parent.getAccessLevel());
                 callback(this.get('_accessLevel'));
             }, this).fetch();
@@ -41,12 +43,27 @@ var ItemModel = Model.extend({
      */
     getRootPath: function (callback) {
         return restRequest({
-            path: this.resourceName + '/' + this.get('_id') + '/rootpath'
-        }).done(_.bind(function (resp) {
+            url: `${this.resourceName}/${this.id}/rootpath`
+        }).done((resp) => {
             callback(resp);
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
+    },
+
+    /**
+     * Get the files within the item.
+     */
+    getFiles: function () {
+        return restRequest({
+            url: `${this.resourceName}/${this.id}/files`
+        }).then((resp) => {
+            let fileCollection = new FileCollection(resp);
+            this.trigger('g:files', fileCollection);
+            return fileCollection;
+        }).fail((err) => {
+            this.trigger('g:error', err);
+        });
     }
 });
 

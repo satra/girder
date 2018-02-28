@@ -21,6 +21,7 @@ import datetime
 import six
 
 from girder.constants import AccessType, SettingKey, TokenScope
+from girder.exceptions import AccessException
 from girder.utility import genToken
 from .model_base import AccessControlledModel
 
@@ -57,8 +58,10 @@ class Token(AccessControlledModel):
         :type apiKey: dict
         :returns: The token document that was created.
         """
+        from .setting import Setting
+
         now = datetime.datetime.utcnow()
-        days = days or self.model('setting').get(SettingKey.COOKIE_LIFETIME)
+        days = days or Setting().get(SettingKey.COOKIE_LIFETIME)
 
         if scope is None:
             scope = (TokenScope.USER_AUTH,)
@@ -130,6 +133,20 @@ class Token(AccessControlledModel):
         if isinstance(scope, six.string_types):
             scope = (scope,)
         return set(scope).issubset(set(self.getAllowedScopes(token)))
+
+    def requireScope(self, token, scope):
+        """
+        Raise an error if given set of scopes are not included.
+
+        :param token: The token object.
+        :type token: dict
+        :param scope: A scope or set of scopes that will be tested as a subset
+            of the given token's allowed scopes.
+        :type scope: str or list of str
+        """
+
+        if not self.hasScope(token, scope):
+            raise AccessException('Invalid token scope, required: %s.' % (scope))
 
     def clearForApiKey(self, apiKey):
         """

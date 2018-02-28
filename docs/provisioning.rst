@@ -2,8 +2,8 @@
 
 Provisioning
 ============
-Girder is packaged for provisioning through the popular IT automation tool Ansible. 
-    
+Girder is packaged for provisioning through the popular IT automation tool Ansible.
+
 Specifically, Girder is available as an Ansible role to be fetched through Ansible Galaxy.
 This allows for a user to point their own Ansible playbook at a number of servers and deploy
 Girder with a single command. Provided in Girder are a number of example playbooks to demonstrate
@@ -11,7 +11,7 @@ various ways Girder can be deployed using Ansible.
 
 To test these roles, one can use Vagrant with any of our playbooks to deploy Girder to a live machine.
 
-.. note:: Our playbooks are only currently supporting Ubuntu 14.04 and require Ansible >= 2.1.1.
+.. note:: Our playbooks are only currently supporting Ubuntu 14.04 and CentOS 7, and require Ansible >= 2.1.1.
 
 Example: Deploying Girder with NGINX to a VirtualBox
 ####################################################
@@ -23,6 +23,12 @@ Assuming a working copy of Girder is in your current directory: ::
 
 After a few minutes of running you should have a functioning Girder instance sitting behind an NGINX
 proxy at http://localhost:9080.
+
+Additionally, our examples support running on a CentOS 7 virtual machine. The above example can be executed on such a machine by running the following command: ::
+
+  GIRDER_EXAMPLE=girder-nginx VAGRANT_BOX=centos/7 vagrant up
+
+.. note:: The `centos/7` box requires guest additions in order to work with shared folders. This means you may need the `vagrant-vbguest` plugin.
 
 Using Ansible outside of Vagrant
 ################################

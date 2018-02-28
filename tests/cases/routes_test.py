@@ -17,10 +17,16 @@
 #  limitations under the License.
 ###############################################################################
 
+import os
+import requests
+
 from .. import base
+from girder import config
 from girder.api import access
 from girder.api.describe import Description, describeRoute
-from girder.api.rest import Resource, RestException
+from girder.api.rest import Resource
+from girder.exceptions import GirderException, RestException
+from girder.models.setting import Setting
 from girder.constants import SettingKey, SettingDefault
 
 testServer = None
@@ -28,7 +34,9 @@ testServer = None
 
 def setUpModule():
     global testServer
-    testServer = base.startServer()
+    os.environ['GIRDER_PORT'] = os.environ.get('GIRDER_TEST_PORT', '20200')
+    config.loadConfig()
+    testServer = base.startServer(mock=False)
 
 
 def tearDownModule():
@@ -66,6 +74,10 @@ class RoutesTestCase(base.TestCase):
     Unit tests of the routing system of REST Resources.
     """
     def testRouteSystem(self):
+        # Test an empty route handler
+        emptyResource = Resource()
+        self.assertRaises(GirderException, emptyResource.handleRoute, 'GET', (), {})
+
         dummy = DummyResource()
 
         # Bad route should give a useful exception.
@@ -90,10 +102,19 @@ class RoutesTestCase(base.TestCase):
         dummy.route('DUMMY', (':id', 'dummy'), dummy.handler)
         r = dummy.handleRoute('DUMMY', ('guid', 'dummy'), {})
         self.assertEqual(r, {'id': 'guid', 'params': {}})
+
+        # Test getting the route handler
+        self.assertRaises(Exception, dummy.getRouteHandler, 'FOO', (':id', 'dummy'))
+        self.assertRaises(Exception, dummy.getRouteHandler, 'DUMMY', (':id', 'foo'))
+        registeredHandler = dummy.getRouteHandler('DUMMY', (':id', 'dummy'))
+        # The handler method cannot be compared directly with `is`, but its name and behavior can be
+        # examined
+        self.assertEqual(registeredHandler.__name__, dummy.handler.__name__)
+        self.assertEqual(registeredHandler(foo=42), {'foo': 42})
+
         # Now remove the route
-        dummy.removeRoute('DUMMY', (':id', 'dummy'), dummy.handler)
-        self.assertRaises(RestException, dummy.handleRoute, 'DUMMY',
-                          ('guid', 'dummy'), {})
+        dummy.removeRoute('DUMMY', (':id', 'dummy'))
+        self.assertRaises(RestException, dummy.handleRoute, 'DUMMY', ('guid', 'dummy'), {})
 
     def testCORS(self):
         testServer.root.api.v1.dummy = DummyResource()
@@ -112,8 +133,7 @@ class RoutesTestCase(base.TestCase):
         self.assertFalse('Access-Control-Allow-Origin' in resp.headers)
 
         # If we allow some origins, we should get the corresponding header
-        self.model('setting').set(SettingKey.CORS_ALLOW_ORIGIN,
-                                  'http://kitware.com')
+        Setting().set(SettingKey.CORS_ALLOW_ORIGIN, 'http://kitware.com')
         resp = self.request(path='/dummy/test', additionalHeaders=[
             ('Origin', 'http://foo.com')
         ])
@@ -123,7 +143,7 @@ class RoutesTestCase(base.TestCase):
                          'true')
 
         # Simulate a preflight request; we should get back several headers
-        self.model('setting').set(SettingKey.CORS_ALLOW_METHODS, 'POST')
+        Setting().set(SettingKey.CORS_ALLOW_METHODS, 'POST')
         resp = self.request(
             path='/dummy/test', method='OPTIONS', additionalHeaders=[
                 ('Origin', 'http://foo.com')
@@ -139,15 +159,19 @@ class RoutesTestCase(base.TestCase):
                          SettingDefault.defaults[SettingKey.CORS_ALLOW_HEADERS])
         self.assertEqual(resp.headers['Access-Control-Allow-Methods'], 'POST')
 
+        # Make an actual preflight request with query parameters; CherryPy 11.1
+        # introduced a bug where this would fail with a 405.
+        resp = requests.options(
+            'http://127.0.0.1:%s/api/v1/folder?key=value' % os.environ['GIRDER_TEST_PORT'])
+        self.assertEqual(resp.status_code, 200)
+
         # Set multiple allowed origins
-        self.model('setting').set(SettingKey.CORS_ALLOW_ORIGIN,
-                                  'http://foo.com, http://bar.com')
+        Setting().set(SettingKey.CORS_ALLOW_ORIGIN, 'http://foo.com, http://bar.com')
         resp = self.request(
             path='/dummy/test', method='GET', additionalHeaders=[
                 ('Origin', 'http://bar.com')
             ], isJson=False)
-        self.assertEqual(resp.headers['Access-Control-Allow-Origin'],
-                         'http://bar.com')
+        self.assertEqual(resp.headers['Access-Control-Allow-Origin'], 'http://bar.com')
 
         resp = self.request(
             path='/dummy/test', method='GET', additionalHeaders=[

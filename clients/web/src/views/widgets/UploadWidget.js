@@ -146,18 +146,17 @@ var UploadWidget = View.extend({
         if (this.modal) {
             this.$el.html(UploadWidgetTemplate(templateParams));
 
-            var base = this;
             var dialogid;
             if (this.parentType === 'file') {
                 dialogid = this.parent.get('_id');
             }
 
-            this.$el.girderModal(this).on('hidden.bs.modal', function () {
+            this.$el.girderModal(this).on('hidden.bs.modal', () => {
                 /* If we are showing the resume option, we have a partial upload
                  * that should be deleted, since the user has no way to get back
                  * to it. */
-                if ($('.g-resume-upload').length && base.currentFile) {
-                    base.currentFile.abortUpload();
+                if ($('.g-resume-upload').length && this.currentFile) {
+                    this.currentFile.abortUpload();
                 }
                 handleClose('upload', undefined, dialogid);
             });
@@ -176,7 +175,15 @@ var UploadWidget = View.extend({
         this.$('.g-drop-zone')
             .removeClass('g-dropzone-show')
             .html(`<i class="icon-docs"/> ${this._browseText}`);
-        this.files = e.originalEvent.dataTransfer.files;
+
+        var dataTransfer = e.originalEvent.dataTransfer;
+
+        // Require all dropped items to be files
+        if (!_.every(dataTransfer.items, (item) => this._isFile(item))) {
+            this.$('.g-upload-error-message').html('Only files may be uploaded.');
+            return;
+        }
+        this.files = dataTransfer.files;
 
         if (!this.multiFile && this.files.length > 1) {
             // If in single-file mode and the user drops multiple files,
@@ -262,10 +269,10 @@ var UploadWidget = View.extend({
             return;
         }
 
-        this.currentFile = this.parentType === 'file'
-                ? this.parent : new FileModel();
+        this.currentFile = this.parentType === 'file' ? this.parent : new FileModel();
 
         this.currentFile.on('g:upload.complete', function () {
+            this.files[this.currentIndex].id = this.currentFile.id;
             this.currentIndex += 1;
             this.uploadNextFile();
         }, this).on('g:upload.chunkSent', function (info) {
@@ -306,8 +313,28 @@ var UploadWidget = View.extend({
             }
             this.currentFile.upload(this.parent, this.files[this.currentIndex], null, otherParams);
         }
+    },
+
+    /**
+     * Check whether a DataTransferItem from a drag and drop operation
+     * represents a file, as opposed to a directory, URI, string, or other
+     * entity.
+     * @param {DataTransferItem} item - The item from a drag and drop operation.
+     * @returns {boolean} True if item represents a file.
+     */
+    _isFile: function (item) {
+        var getAsEntry = item.getAsEntry;
+        if (!_.isFunction(getAsEntry)) {
+            getAsEntry = item.webkitGetAsEntry;
+        }
+        if (!_.isFunction(getAsEntry)) {
+            // Unsupported; assume item is file
+            return true;
+        }
+
+        var entry = getAsEntry.call(item);
+        return entry && entry.isFile;
     }
 });
 
 export default UploadWidget;
-

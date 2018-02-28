@@ -1,5 +1,3 @@
-import _ from 'underscore';
-
 import AssetstoreModel from 'girder/models/AssetstoreModel';
 import { restRequest } from 'girder/rest';
 
@@ -8,15 +6,15 @@ import { restRequest } from 'girder/rest';
  */
 AssetstoreModel.hdfsImport = function (params) {
     restRequest({
-        path: 'hdfs_assetstore/' + this.get('_id') + '/import',
-        type: 'PUT',
+        url: `hdfs_assetstore/${this.id}/import`,
+        method: 'PUT',
         data: params,
         error: null
-    }).done(_.bind(function () {
+    }).done(() => {
         this.trigger('g:imported');
-    }, this)).error(_.bind(function (err) {
+    }).fail((err) => {
         this.trigger('g:error', err);
-    }, this));
+    });
 
     return this;
 };

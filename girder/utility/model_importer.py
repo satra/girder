@@ -29,7 +29,6 @@ _modelInstances = {}
 
 
 def _loadModel(model, module, plugin):
-    global _modelInstances
     className = camelcase(model)
 
     try:
@@ -40,7 +39,7 @@ def _loadModel(model, module, plugin):
 
     try:
         constructor = getattr(imported, className)
-    except AttributeError:  # pragma: no cover
+    except AttributeError:
         raise Exception('Incorrect model class name "%s" for model "%s".' % (
             className, module))
 
@@ -50,6 +49,8 @@ def _loadModel(model, module, plugin):
 def reinitializeAll():
     """
     Force all models to reconnect/rebuild indices (needed for testing).
+
+    .. deprecated
     """
     for pluginModels in list(six.viewvalues(_modelInstances)):
         for model in list(six.viewvalues(pluginModels)):
@@ -76,8 +77,6 @@ class ModelImporter(object):
                        set this to the name of the plugin containing the model.
         :returns: The instantiated model, which is a singleton.
         """
-        global _modelInstances
-
         if plugin is None:
             plugin = '_core'
 
@@ -107,4 +106,10 @@ class ModelImporter(object):
         :param instance: The model singleton instance.
         :type instance: subclass of Model
         """
+        if plugin not in _modelInstances:
+            _modelInstances[plugin] = {}
         _modelInstances[plugin][model] = instance
+
+    @staticmethod
+    def unregisterModel(model, plugin='_core'):
+        del _modelInstances[plugin][model]

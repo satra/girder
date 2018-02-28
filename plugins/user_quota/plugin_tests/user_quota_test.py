@@ -23,7 +23,12 @@ import os
 
 from tests import base
 from girder.constants import AssetstoreType, SettingKey
-from girder.models.model_base import ValidationException
+from girder.exceptions import ValidationException
+from girder.models.assetstore import Assetstore
+from girder.models.collection import Collection
+from girder.models.folder import Folder
+from girder.models.setting import Setting
+from girder.models.user import User
 from girder.utility.system import formatSize
 
 
@@ -34,6 +39,7 @@ def setUpModule():
 
 def tearDownModule():
     base.stopServer()
+    base.dropAllTestDatabases()
 
 
 class QuotaTestCase(base.TestCase):
@@ -47,7 +53,7 @@ class QuotaTestCase(base.TestCase):
             'password': 'adminpassword',
             'admin': True
         }
-        self.admin = self.model('user').createUser(**admin)
+        self.admin = User().createUser(**admin)
         user = {
             'email': 'good@email.com',
             'login': 'goodlogin',
@@ -56,15 +62,15 @@ class QuotaTestCase(base.TestCase):
             'password': 'goodpassword',
             'admin': False
         }
-        self.user = self.model('user').createUser(**user)
+        self.user = User().createUser(**user)
         coll = {
             'name': 'Test Collection',
             'description': 'The description',
             'public': True,
             'creator': self.admin
         }
-        self.collection = self.model('collection').createCollection(**coll)
-        self.model('folder').createFolder(
+        self.collection = Collection().createCollection(**coll)
+        Folder().createFolder(
             parent=self.collection, parentType='collection', name='Public',
             public=True, creator=self.admin)
 
@@ -152,7 +158,7 @@ class QuotaTestCase(base.TestCase):
                             params={'policy': policyJSON})
         if error:
             self.assertStatus(resp, 400)
-            self.assertTrue(error in resp.json['message'])
+            self.assertIn(error, resp.json['message'])
             return
         self.assertStatusOk(resp)
         resp = self.request(path=path, method='GET', user=user)
@@ -184,7 +190,7 @@ class QuotaTestCase(base.TestCase):
         elif model == 'collection':
             key = constants.PluginSettings.QUOTA_DEFAULT_COLLECTION_QUOTA
         try:
-            self.model('setting').set(key, value)
+            Setting().set(key, value)
         except ValidationException as err:
             if not error:
                 raise
@@ -192,7 +198,7 @@ class QuotaTestCase(base.TestCase):
                 raise
             return
         if testVal is not '__NOCHECK__':
-            newVal = self.model('setting').get(key)
+            newVal = Setting().get(key)
             self.assertEqual(newVal, testVal)
 
     def _testAssetstores(self, model, resource, user):
@@ -256,7 +262,7 @@ class QuotaTestCase(base.TestCase):
         :param resource: the document for the resource to test.
         :param user: user to use for authorization.
         """
-        self.model('setting').set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
+        Setting().set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
         resp = self.request(path='/folder', method='GET', user=user,
                             params={'parentType': model,
                                     'parentId': resource['_id']})
@@ -333,7 +339,7 @@ class QuotaTestCase(base.TestCase):
 
         # Create a broken assetstore. (Must bypass validation since it should
         # not let us create an assetstore in a broken state).
-        self.model('assetstore').save({
+        Assetstore().save({
             'name': 'Broken Store',
             'type': AssetstoreType.FILESYSTEM,
             'root': '/dev/null',
@@ -367,10 +373,10 @@ class QuotaTestCase(base.TestCase):
         # We can only set certain keys
         self._setPolicy('this is not json',
                         'user', self.user, self.user,
-                        error='The policy parameter must be JSON.')
+                        error='Parameter policy must be valid JSON.')
         self._setPolicy(json.dumps(['this is not a dictionary']),
                         'user', self.user, self.user,
-                        error='The policy parameter must be a dictionary.')
+                        error='Parameter policy must be a JSON object.')
         # We can only set certain keys
         self._setPolicy({'notAKey': 'notAValue'},
                         'user', self.user, self.user,

@@ -8,8 +8,6 @@ import { confirm } from 'girder/dialog';
 
 import GroupInviteListTemplate from 'girder/templates/widgets/groupInviteList.pug';
 
-import 'bootstrap/js/tooltip';
-
 /**
  * This view shows a list of pending invitations to the group.
  */
@@ -17,18 +15,17 @@ var GroupInvitesWidget = View.extend({
     events: {
         'click .g-group-uninvite': function (e) {
             var li = $(e.currentTarget).parents('li');
-            var view = this;
 
             confirm({
                 text: 'Are you sure you want to remove the invitation ' +
                     'for <b>' + _.escape(li.attr('username')) + '</b>?',
                 escapedHtml: true,
-                confirmCallback: function () {
-                    var user = view.collection.get(li.attr('cid'));
-                    view.group.off('g:removed').on('g:removed', function () {
-                        view.collection.remove(user);
-                        view.render();
-                        view.parentView.render();
+                confirmCallback: () => {
+                    var user = this.collection.get(li.attr('cid'));
+                    this.group.off('g:removed').on('g:removed', () => {
+                        this.collection.remove(user);
+                        this.render();
+                        this.parentView.render();
                     }).removeMember(user.get('_id'));
                 }
             });
@@ -51,13 +48,6 @@ var GroupInvitesWidget = View.extend({
             invitees: this.collection.toArray(),
             accessType: AccessType
         }));
-
-        this.$('a[title]').tooltip({
-            container: this.$el,
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
 
         return this;
     }

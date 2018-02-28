@@ -1,4 +1,4 @@
-import _ from 'underscore';
+import $ from 'jquery';
 
 import GroupCollection from 'girder/collections/GroupCollection';
 import PluginConfigBreadcrumbWidget from 'girder/views/widgets/PluginConfigBreadcrumbWidget';
@@ -58,15 +58,15 @@ var ConfigView = View.extend({
         }, this).fetch();
 
         restRequest({
-            type: 'GET',
-            path: 'system/setting',
+            method: 'GET',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(['autojoin'])
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.rules = resp['autojoin'] || [];
             this.render();
-        }, this));
+        });
     },
 
     render: function () {
@@ -96,36 +96,29 @@ var ConfigView = View.extend({
             parentView: this
         }).render();
 
-        this.$('[title]').tooltip({
-            container: this.$el,
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
-
         return this;
     },
 
     _saveSettings: function (settings) {
         restRequest({
-            type: 'PUT',
-            path: 'system/setting',
+            method: 'PUT',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(settings)
             },
             error: null
-        }).done(_.bind(function () {
+        }).done(() => {
             events.trigger('g:alert', {
                 icon: 'ok',
                 text: 'Settings saved.',
                 type: 'success',
                 timeout: 4000
             });
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             this.$('#g-autojoin-error-message').text(
                 resp.responseJSON.message
             );
-        }, this));
+        });
     }
 });
 

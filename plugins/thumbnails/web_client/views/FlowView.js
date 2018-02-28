@@ -1,4 +1,4 @@
-import _ from 'underscore';
+import $ from 'jquery';
 
 import FileModel from 'girder/models/FileModel';
 import View from 'girder/views/View';
@@ -19,7 +19,7 @@ var FlowView = View.extend({
             confirm({
                 text: 'Are you sure you want to delete this thumbnail?',
                 yesText: 'Delete',
-                confirmCallback: _.bind(function () {
+                confirmCallback: () => {
                     file.on('g:deleted', function () {
                         container.remove();
                     }).on('g:error', function () {
@@ -30,8 +30,16 @@ var FlowView = View.extend({
                             timeout: 4000
                         });
                     }).destroy();
-                }, this)
+                }
             });
+        },
+
+        'mouseenter .g-thumbnail-container': function () {
+            this.$('.g-thumbnail-actions-container').addClass('g-show');
+        },
+
+        'mouseleave .g-thumbnail-container': function () {
+            this.$('.g-thumbnail-actions-container').removeClass('g-show');
         }
     },
 
@@ -42,20 +50,12 @@ var FlowView = View.extend({
 
     render: function () {
         this.$el.html(FlowViewTemplate({
-            thumbnails: this.thumbnails,
+            thumbnails: this.thumbnails.toArray(),
             accessLevel: this.accessLevel,
             AccessType: AccessType
         }));
 
-        this.$('.g-thumbnail-actions-container a').tooltip({
-            delay: 100
-        });
-
-        this.$('.g-thumbnail-container').hover(function () {
-            $('.g-thumbnail-actions-container', this).addClass('g-show');
-        }, function () {
-            $('.g-thumbnail-actions-container', this).removeClass('g-show');
-        });
+        return this;
     }
 });
 

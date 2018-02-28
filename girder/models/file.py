@@ -21,11 +21,11 @@ import cherrypy
 import datetime
 import six
 
-from .model_base import Model, ValidationException
+from .model_base import Model, AccessControlledModel
 from girder import events
 from girder.constants import AccessType, CoreEventHandler
-from girder.models.model_base import AccessControlledModel
-from girder.utility import assetstore_utilities, acl_mixin
+from girder.exceptions import ValidationException
+from girder.utility import acl_mixin
 
 
 class File(acl_mixin.AccessControlMixin, Model):
@@ -33,6 +33,8 @@ class File(acl_mixin.AccessControlMixin, Model):
     This model represents a File, which is stored in an assetstore.
     """
     def initialize(self):
+        from girder.utility import assetstore_utilities
+
         self.name = 'file'
         self.ensureIndices(
             ['itemId', 'assetstoreId', 'exts'] +
@@ -61,11 +63,13 @@ class File(acl_mixin.AccessControlMixin, Model):
             to False if you plan to delete the item and do not care about
             updating its size.
         """
+        from .item import Item
+
         if file.get('assetstoreId'):
             self.getAssetstoreAdapter(file).deleteFile(file)
 
         if file['itemId']:
-            item = self.model('item').load(file['itemId'], force=True)
+            item = Item().load(file['itemId'], force=True)
             # files that are linkUrls might not have a size field
             if 'size' in file:
                 self.propagateSizeChange(item, -file['size'], updateItemSize)
@@ -93,21 +97,56 @@ class File(acl_mixin.AccessControlMixin, Model):
         :type contentDisposition: str or None
         :type extraParameters: str or None
         """
+        events.trigger('model.file.download.request', info={
+            'file': file,
+            'startByte': offset,
+            'endByte': endByte})
+
         if file.get('assetstoreId'):
-            return self.getAssetstoreAdapter(file).downloadFile(
-                file, offset=offset, headers=headers, endByte=endByte,
-                contentDisposition=contentDisposition,
-                extraParameters=extraParameters)
+            try:
+                fileDownload = self.getAssetstoreAdapter(file).downloadFile(
+                    file, offset=offset, headers=headers, endByte=endByte,
+                    contentDisposition=contentDisposition,
+                    extraParameters=extraParameters)
+
+                def downloadGenerator():
+                    for data in fileDownload():
+                        yield data
+                    if endByte is None or endByte >= file['size']:
+                        events.trigger('model.file.download.complete', info={
+                            'file': file,
+                            'startByte': offset,
+                            'endByte': endByte,
+                            'redirect': False})
+                return downloadGenerator
+            except cherrypy.HTTPRedirect:
+                events.trigger('model.file.download.complete', info={
+                    'file': file,
+                    'startByte': offset,
+                    'endByte': endByte,
+                    'redirect': True})
+                raise
         elif file.get('linkUrl'):
             if headers:
+                events.trigger('model.file.download.complete', info={
+                    'file': file,
+                    'startByte': offset,
+                    'endByte': endByte,
+                    'redirect': True})
                 raise cherrypy.HTTPRedirect(file['linkUrl'])
             else:
                 endByte = endByte or len(file['linkUrl'])
 
                 def stream():
                     yield file['linkUrl'][offset:endByte]
+                    if endByte >= len(file['linkUrl']):
+                        events.trigger('model.file.download.complete', info={
+                            'file': file,
+                            'startByte': offset,
+                            'endByte': endByte,
+                            'redirect': False})
                 return stream
-        else:  # pragma: no cover
+        else:
             raise Exception('File has no known download mechanism.')
 
     def validate(self, doc):
@@ -122,6 +161,9 @@ class File(acl_mixin.AccessControlMixin, Model):
                 raise ValidationException(
                     'Linked file URL must start with http: or https:.',
                     'linkUrl')
+        if doc.get('assetstoreType'):
+            # If assetstore model is overridden, make sure it's a valid model
+            self._getAssetstoreModel(doc)
         if 'name' not in doc or not doc['name']:
             raise ValidationException('File name must not be empty.', 'name')
 
@@ -129,7 +171,23 @@ class File(acl_mixin.AccessControlMixin, Model):
 
         return doc
 
-    def createLinkFile(self, name, parent, parentType, url, creator, size=None, mimeType=None):
+    def _getAssetstoreModel(self, file):
+        from .assetstore import Assetstore
+
+        if file.get('assetstoreType'):
+            try:
+                if isinstance(file['assetstoreType'], six.string_types):
+                    return self.model(file['assetstoreType'])
+                else:
+                    return self.model(*file['assetstoreType'])
+            except Exception:
+                raise ValidationException(
+                    'Invalid assetstore type: %s.' % (file['assetstoreType'],))
+        else:
+            return Assetstore()
+
+    def createLinkFile(self, name, parent, parentType, url, creator, size=None,
+                       mimeType=None, reuseExisting=False):
         """
         Create a file that is a link to a URL, rather than something we maintain
         in an assetstore.
@@ -137,7 +195,7 @@ class File(acl_mixin.AccessControlMixin, Model):
         :param name: The local name for the file.
         :type name: str
         :param parent: The parent object for this file.
-        :type parent: folder or item
+        :type parent: girder.models.folder or girder.models.item
         :param parentType: The parent type (folder or item)
         :type parentType: str
         :param url: The URL that this file points to
@@ -147,33 +205,53 @@ class File(acl_mixin.AccessControlMixin, Model):
         :type size: int
         :param mimeType: The mimeType of the file. (optional)
         :type mimeType: str
+        :param reuseExisting: If a file with the same name already exists in
+            this location, return it rather than creating a new file.
+        :type reuseExisting: bool
         """
+        from .item import Item
+
         if parentType == 'folder':
             # Create a new item with the name of the file.
-            item = self.model('item').createItem(
-                name=name, creator=creator, folder=parent)
+            item = Item().createItem(
+                name=name, creator=creator, folder=parent, reuseExisting=reuseExisting)
         elif parentType == 'item':
             item = parent
 
-        file = {
-            'created': datetime.datetime.utcnow(),
-            'itemId': item['_id'],
+        existing = None
+        if reuseExisting:
+            existing = self.findOne({
+                'itemId': item['_id'],
+                'name': name
+            })
+
+        if existing:
+            file = existing
+        else:
+            file = {
+                'created': datetime.datetime.utcnow(),
+                'itemId': item['_id'],
+                'assetstoreId': None,
+                'name': name
+            }
+
+        file.update({
             'creatorId': creator['_id'],
-            'assetstoreId': None,
-            'name': name,
             'mimeType': mimeType,
             'linkUrl': url
-        }
-
+        })
         if size is not None:
             file['size'] = int(size)
 
         try:
-            file = self.save(file)
+            if existing:
+                file = self.updateFile(file)
+            else:
+                file = self.save(file)
             return file
         except ValidationException:
             if parentType == 'folder':
-                self.model('item').remove(item)
+                Item().remove(item)
             raise
 
     def propagateSizeChange(self, item, sizeIncrement, updateItemSize=True):
@@ -192,14 +270,17 @@ class File(acl_mixin.AccessControlMixin, Model):
             False if you plan to delete the item immediately and don't care to
             update its size.
         """
+        from .folder import Folder
+        from .item import Item
+
         if updateItemSize:
             # Propagate size up to item
-            self.model('item').increment(query={
+            Item().increment(query={
                 '_id': item['_id']
             }, field='size', amount=sizeIncrement, multi=False)
 
         # Propagate size to direct parent folder
-        self.model('folder').increment(query={
+        Folder().increment(query={
             '_id': item['folderId']
         }, field='size', amount=sizeIncrement, multi=False)
 
@@ -209,7 +290,7 @@ class File(acl_mixin.AccessControlMixin, Model):
         }, field='size', amount=sizeIncrement, multi=False)
 
     def createFile(self, creator, item, name, size, assetstore, mimeType=None,
-                   saveFile=True, reuseExisting=False):
+                   saveFile=True, reuseExisting=False, assetstoreType=None):
         """
         Create a new file record in the database.
 
@@ -227,6 +308,11 @@ class File(acl_mixin.AccessControlMixin, Model):
         :param reuseExisting: If a file with the same name already exists in
             this location, return it rather than creating a new file.
         :type reuseExisting: bool
+        :param assetstoreType: If a model other than assetstore will be used to
+            initialize the assetstore adapter for this file, use this parameter to
+            specify it. If it's a core model, pass its string name. If it's a plugin
+            model, use a 2-tuple of the form (modelName, pluginName).
+        :type assetstoreType: str or tuple
         """
         if reuseExisting:
             existing = self.findOne({
@@ -246,6 +332,9 @@ class File(acl_mixin.AccessControlMixin, Model):
             'itemId': item['_id'] if item else None
         }
 
+        if assetstoreType:
+            file['assetstoreType'] = assetstoreType
+
         if saveFile:
             return self.save(file)
         return file
@@ -264,10 +353,12 @@ class File(acl_mixin.AccessControlMixin, Model):
         # certain that the file will actually be saved. It is also possible for
         # "model.file.save" to set "defaultPrevented", which would prevent the
         # item from being saved initially.
+        from .item import Item
+
         fileDoc = event.info
         itemId = fileDoc.get('itemId')
         if itemId and fileDoc.get('size'):
-            item = self.model('item').load(itemId, force=True)
+            item = Item().load(itemId, force=True)
             self.propagateSizeChange(item, fileDoc['size'])
 
     def updateFile(self, file):
@@ -288,7 +379,9 @@ class File(acl_mixin.AccessControlMixin, Model):
         """
         Return the assetstore adapter for the given file.
         """
-        assetstore = self.model('assetstore').load(file['assetstoreId'])
+        from girder.utility import assetstore_utilities
+
+        assetstore = self._getAssetstoreModel(file).load(file['assetstoreId'])
         return assetstore_utilities.getAssetstoreAdapter(assetstore)
 
     def copyFile(self, srcFile, creator, item=None):
@@ -343,8 +436,8 @@ class File(acl_mixin.AccessControlMixin, Model):
                 attachedDoc = modelType.load(
                     file.get('attachedToId'))
         else:
-            attachedDoc = self.model('item').load(
-                file.get('itemId'), force=True)
+            from .item import Item
+            attachedDoc = Item().load(file.get('itemId'), force=True)
         return not attachedDoc
 
     def updateSize(self, file):
@@ -357,3 +450,26 @@ class File(acl_mixin.AccessControlMixin, Model):
         """
         # TODO: check underlying assetstore for size?
         return file.get('size', 0), 0
+
+    def open(self, file):
+        """
+        Use this to expose a Girder file as a python file-like object. At the
+        moment, this is a read-only interface, the equivalent of opening a
+        system file with ``'rb'`` mode. This can also be used as a context
+        manager, e.g.:
+
+        >>> with File().open(file) as fh:
+        >>>    while True:
+        >>>        chunk = fh.read(CHUNK_LEN)
+        >>>        if not chunk:
+        >>>            break
+
+        Using it this way will automatically close the file handle for you when
+        the ``with`` block is left.
+
+        :param file: A Girder file document.
+        :type file: dict
+        :return: A file-like object containing the bytes of the file.
+        :rtype: girder.utility.abstract_assetstore_adapter.FileHandle
+        """
+        return self.getAssetstoreAdapter(file).open(file)

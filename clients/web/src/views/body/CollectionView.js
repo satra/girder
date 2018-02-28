@@ -11,7 +11,7 @@ import View from 'girder/views/View';
 import { AccessType } from 'girder/constants';
 import { cancelRestRequests } from 'girder/rest';
 import { confirm } from 'girder/dialog';
-import { renderMarkdown } from 'girder/misc';
+import { renderMarkdown, formatSize } from 'girder/misc';
 import events from 'girder/events';
 
 import CollectionPageTemplate from 'girder/templates/body/collectionPage.pug';
@@ -19,7 +19,6 @@ import CollectionPageTemplate from 'girder/templates/body/collectionPage.pug';
 import 'girder/stylesheets/body/collectionPage.styl';
 
 import 'bootstrap/js/dropdown';
-import 'bootstrap/js/tooltip';
 
 /**
  * This view shows a single collection's page.
@@ -28,25 +27,7 @@ var CollectionView = View.extend({
     events: {
         'click .g-edit-collection': 'editCollection',
         'click .g-collection-access-control': 'editAccess',
-        'click .g-delete-collection': function () {
-            confirm({
-                text: 'Are you sure you want to delete the collection <b>' +
-                      this.model.escape('name') + '</b>?',
-                yesText: 'Delete',
-                escapedHtml: true,
-                confirmCallback: _.bind(function () {
-                    this.model.on('g:deleted', function () {
-                        events.trigger('g:alert', {
-                            icon: 'ok',
-                            text: 'Collection deleted.',
-                            type: 'success',
-                            timeout: 4000
-                        });
-                        router.navigate('collections', {trigger: true});
-                    }).destroy();
-                }, this)
-            });
-        }
+        'click .g-delete-collection': 'deleteConfirmation'
     },
 
     initialize: function (settings) {
@@ -69,15 +50,12 @@ var CollectionView = View.extend({
                 this.folder.set({
                     _id: settings.folderId
                 }).on('g:fetched', function () {
-                    this._createHierarchyWidget();
                     this.render();
                 }, this).on('g:error', function () {
                     this.folder = null;
-                    this._createHierarchyWidget();
                     this.render();
                 }, this).fetch();
             } else {
-                this._createHierarchyWidget();
                 this.render();
             }
         } else if (settings.id) {
@@ -85,26 +63,9 @@ var CollectionView = View.extend({
             this.model.set('_id', settings.id);
 
             this.model.on('g:fetched', function () {
-                this._createHierarchyWidget();
                 this.render();
             }, this).fetch();
         }
-    },
-
-    _createHierarchyWidget: function () {
-        this.hierarchyWidget = new HierarchyWidget({
-            parentModel: this.folder || this.model,
-            upload: this.upload,
-            folderAccess: this.folderAccess,
-            folderEdit: this.folderEdit,
-            folderCreate: this.folderCreate,
-            itemCreate: this.itemCreate,
-            parentView: this
-        }).on('g:setCurrentModel', function () {
-            // When a user descends into the hierarchy, hide the collection
-            // actions list to avoid confusion.
-            this.$('.g-collection-header .g-collection-actions-button').hide();
-        }, this);
     },
 
     editCollection: function () {
@@ -129,21 +90,33 @@ var CollectionView = View.extend({
             renderMarkdown: renderMarkdown
         }));
 
-        this.hierarchyWidget.setElement(
-            this.$('.g-collection-hierarchy-container')).render();
+        if (!this.hierarchyWidget) {
+            // The HierarchyWidget will self-render when instantiated
+            this.hierarchyWidget = new HierarchyWidget({
+                el: this.$('.g-collection-hierarchy-container'),
+                parentModel: this.folder || this.model,
+                upload: this.upload,
+                folderAccess: this.folderAccess,
+                folderEdit: this.folderEdit,
+                folderCreate: this.folderCreate,
+                itemCreate: this.itemCreate,
+                parentView: this
+            }).on('g:setCurrentModel', () => {
+                // When a user descends into the hierarchy, hide the collection
+                // actions list to avoid confusion.
+                this.$('.g-collection-header .g-collection-actions-button').hide();
+            });
+        } else {
+            this.hierarchyWidget
+                .setElement(this.$('.g-collection-hierarchy-container'))
+                .render();
+        }
 
         this.upload = false;
         this.folderAccess = false;
         this.folderEdit = false;
         this.folderCreate = false;
         this.itemCreate = false;
-
-        this.$('.g-collection-actions-button').tooltip({
-            container: 'body',
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
 
         if (this.edit) {
             this.editCollection();
@@ -165,6 +138,37 @@ var CollectionView = View.extend({
                 this.hierarchyWidget.refreshFolderList();
             }
         }, this);
+    },
+
+    deleteConfirmation: function () {
+        let params = {
+            text: 'Are you sure you want to delete the collection <b>' +
+                  this.model.escape('name') + this.model.escape('nFolders') + '</b>?',
+            yesText: 'Delete',
+            escapedHtml: true,
+            confirmCallback: () => {
+                this.model.on('g:deleted', function () {
+                    events.trigger('g:alert', {
+                        icon: 'ok',
+                        text: 'Collection deleted.',
+                        type: 'success',
+                        timeout: 4000
+                    });
+                    router.navigate('collections', {trigger: true});
+                }).destroy();
+            }
+        };
+        if (this.model.get('nFolders') !== 0 || this.model.get('size') !== 0) {
+            params = _.extend({
+                additionalText: '<b>' + this.model.escape('name') + '</b>' +
+                                ' contains <b>' + this.model.escape('nFolders') +
+                                ' folders</b> taking up <b>' +
+                                formatSize(parseInt(this.model.get('size'), 10)) + '</b>',
+                msgConfirmation: true,
+                name: this.model.escape('name')
+            }, params);
+        }
+        confirm(params);
     }
 }, {
     /**

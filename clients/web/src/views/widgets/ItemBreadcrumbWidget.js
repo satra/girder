@@ -3,9 +3,7 @@ import $ from 'jquery';
 import router from 'girder/router';
 import View from 'girder/views/View';
 
-import IteamBreadcrumbTemplate from 'girder/templates/widgets/itemBreadcrumb.pug';
-
-import 'bootstrap/js/tooltip';
+import ItemBreadcrumbTemplate from 'girder/templates/widgets/itemBreadcrumb.pug';
 
 /**
  * Renders the a breadcrumb for the item page
@@ -15,7 +13,7 @@ var ItemBreadcrumbWidget = View.extend({
         'click a.g-item-breadcrumb-link': function (event) {
             var link = $(event.currentTarget);
             router.navigate(link.data('type') + '/' + link.data('id'),
-                                   {trigger: true});
+                {trigger: true});
         },
         'click a.g-hierarchy-level-up': function () {
             var folder = this.parentChain.pop().object;
@@ -29,16 +27,11 @@ var ItemBreadcrumbWidget = View.extend({
     },
 
     render: function () {
-        this.$el.html(IteamBreadcrumbTemplate({
+        this.$el.html(ItemBreadcrumbTemplate({
             parentChain: this.parentChain
         }));
 
-        this.$('.g-hierarchy-level-up').tooltip({
-            container: this.$el,
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
+        return this;
     }
 });
 

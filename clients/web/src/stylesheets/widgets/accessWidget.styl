@@ -1,5 +1,3 @@
-@import '~nib/index.styl'
-
 .g-access-modal-body
   padding-top 10px
   padding-bottom 0
@@ -28,13 +26,28 @@
   font-weight bold
   padding 3px 10px
 
+i.g-flag-icon
+  position relative
+
+.g-flag-count-indicator
+  display inline-block
+  border-radius 3px
+  background-color #c80000
+  color white
+  position absolute
+  font-size 9px
+  bottom -4px
+  right -1px
+  padding 0 0.3em
+  font-style normal
+
 .g-ac-list
   border 1px solid #d7d7d7
   border-top none
   background linear-gradient(top, #d3d3d3 0, #f0f0f0 6px)
   padding 1px 4px
 
-  .g-group-access-entry,.g-user-access-entry
+  .g-group-access-entry, .g-user-access-entry
     margin 9px 0
 
   .g-access-icon

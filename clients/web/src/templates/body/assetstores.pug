@@ -62,10 +62,13 @@
               span.g-access-key-id  #{assetstore.get('accessKeyId')}
             div
               b Secret access key:
-              span.g-secret-key  #{assetstore.get('secret')}
+              span.g-secret-key  #{assetstore.get('secret') && '[hidden]'}
             div
               b Service:
               span.g-service-key  #{assetstore.get('service')}
+            div
+              b Region:
+              span.g-region-key  #{assetstore.get('region')}
 
         if assetstore.capacityKnown()
           div
@@ -81,7 +84,7 @@
           else
             .g-assetstore-button-container(title="You must delete all files from the assetstore before you can delete the assetstore.")
               button.g-delete-assetstore.btn.btn-sm.btn-danger.disabled(
-                  cid=assetstore.cid) Delete
+                  cid=assetstore.cid, disabled) Delete
           if !assetstore.get('current') && !assetstore.get('readOnly')
             button.g-set-current.btn.btn-sm.btn-primary(
               cid=assetstore.cid) Set as current

@@ -17,9 +17,16 @@
 #  limitations under the License.
 ###############################################################################
 
-import six
 import hashlib
+import six
+import time
 
+from girder.exceptions import ValidationException
+from girder.models.file import File
+from girder.models.folder import Folder
+from girder.models.setting import Setting
+from girder.models.upload import Upload
+from girder.models.user import User
 from tests import base
 
 
@@ -51,7 +58,7 @@ class HashsumDownloadTest(base.TestCase):
         #
         # In summary, user has access to all the files and otherUser to none.
 
-        self.user = self.model('user').createUser(
+        self.user = User().createUser(
             login='leeloo',
             password='multipass',
             firstName='Leeloominai',
@@ -59,8 +66,7 @@ class HashsumDownloadTest(base.TestCase):
             email='quinque@universe.org'
         )
 
-        for folder in self.model('folder').childFolders(
-                parent=self.user, parentType='user', user=self.user):
+        for folder in Folder().childFolders(parent=self.user, parentType='user', user=self.user):
             if folder['public'] is True:
                 self.publicFolder = folder
             else:
@@ -68,7 +74,7 @@ class HashsumDownloadTest(base.TestCase):
 
         self.userData = u'\u266a Il dolce suono mi ' \
                         u'colp\u00ec di sua voce! \u266a'.encode('utf8')
-        self.privateFile = self.model('upload').uploadFromFile(
+        self.privateFile = Upload().uploadFromFile(
             obj=six.BytesIO(self.userData),
             size=len(self.userData),
             name='Il dolce suono - PRIVATE',
@@ -77,7 +83,7 @@ class HashsumDownloadTest(base.TestCase):
             user=self.user,
             mimeType='audio/mp4'
         )
-        self.publicFile = self.model('upload').uploadFromFile(
+        self.publicFile = Upload().uploadFromFile(
             obj=six.BytesIO(self.userData),
             size=len(self.userData),
             name='Il dolce suono - PUBLIC',
@@ -86,7 +92,7 @@ class HashsumDownloadTest(base.TestCase):
             user=self.user,
             mimeType='audio/flac'
         )
-        self.duplicatePublicFile = self.model('upload').uploadFromFile(
+        self.duplicatePublicFile = Upload().uploadFromFile(
             obj=six.BytesIO(self.userData),
             size=len(self.userData),
             name='Il dolce suono - PUBLIC DUPLICATE',
@@ -98,7 +104,7 @@ class HashsumDownloadTest(base.TestCase):
 
         self.privateOnlyData =\
             u'\u2641 \u2600 \u2601 \u2614 \u2665'.encode('utf8')
-        self.privateOnlyFile = self.model('upload').uploadFromFile(
+        self.privateOnlyFile = Upload().uploadFromFile(
             obj=six.BytesIO(self.privateOnlyData),
             size=len(self.privateOnlyData),
             name='Powers combined',
@@ -108,7 +114,7 @@ class HashsumDownloadTest(base.TestCase):
             mimeType='image/png'
         )
 
-        self.otherUser = self.model('user').createUser(
+        self.otherUser = User().createUser(
             login='zorg',
             password='mortis',
             firstName='Jean-Baptiste',
@@ -246,17 +252,115 @@ class HashsumDownloadTest(base.TestCase):
         # Test with bad algo
         resp = self.request(template % (self.publicFile['_id'], 'foo'))
         self.assertStatus(resp, 400)
-        six.assertRegex(self, resp.json['message'], '^Invalid algorithm "foo"')
+        six.assertRegex(self, resp.json['message'], '^Invalid value for algo: "foo"')
 
         # Should work with public file
         resp = self.request(template % (self.publicFile['_id'], 'sha512'),
                             isJson=False)
         self.assertStatusOk(resp)
-        hash = self.getBody(resp)
-        self.assertEqual(hash, self.publicFile['sha512'])
-        self.assertEqual(len(hash), 128)
+        respBody = self.getBody(resp)
+        self.assertEqual(respBody, '%s\n' % self.publicFile['sha512'])
+        self.assertEqual(len(respBody), 129)
 
         # Should not work with private file
         resp = self.request(template % (self.privateFile['_id'], 'sha512'))
         self.assertStatus(resp, 401)
         six.assertRegex(self, resp.json['message'], '^Read access denied')
+
+    def testAutoComputeHashes(self):
+        from girder.plugins import hashsum_download
+        with self.assertRaises(ValidationException):
+            Setting().set(hashsum_download.PluginSettings.AUTO_COMPUTE, 'bad')
+
+        old = hashsum_download.SUPPORTED_ALGORITHMS
+        hashsum_download.SUPPORTED_ALGORITHMS = {'sha512', 'sha256'}
+        Setting().set(hashsum_download.PluginSettings.AUTO_COMPUTE, True)
+
+        file = Upload().uploadFromFile(
+            obj=six.BytesIO(self.userData), size=len(self.userData), name='Another file',
+            parentType='folder', parent=self.privateFolder, user=self.user)
+
+        start = time.time()
+        while time.time() < start + 15:
+            file = File().load(file['_id'], force=True)
+            if 'sha256' in file:
+                break
+            time.sleep(0.2)
+
+        expected = hashlib.sha256()
+        expected.update(self.userData)
+        self.assertIn('sha256', file)
+        self.assertEqual(file['sha256'], expected.hexdigest())
+
+        expected = hashlib.sha512()
+        expected.update(self.userData)
+        self.assertIn('sha512', file)
+        self.assertEqual(file['sha512'], expected.hexdigest())
+
+        hashsum_download.SUPPORTED_ALGORITHMS = old
+
+    def testManualComputeHashes(self):
+        from girder.plugins import hashsum_download
+        Setting().set(hashsum_download.PluginSettings.AUTO_COMPUTE, False)
+        old = hashsum_download.SUPPORTED_ALGORITHMS
+        hashsum_download.SUPPORTED_ALGORITHMS = {'sha512', 'sha256'}
+
+        self.assertNotIn('sha256', self.privateFile)
+
+        expected = hashlib.sha256()
+        expected.update(self.userData)
+
+        # Running the compute endpoint should only compute the missing ones
+        resp = self.request(
+            '/file/%s/hashsum' % self.privateFile['_id'], method='POST', user=self.user)
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json, {
+            'sha256': expected.hexdigest()
+        })
+
+        # Running again should be a no-op
+        resp = self.request(
+            '/file/%s/hashsum' % self.privateFile['_id'], method='POST', user=self.user)
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json, None)
+
+        file = File().load(self.privateFile['_id'], force=True)
+        self.assertEqual(file['sha256'], expected.hexdigest())
+
+        hashsum_download.SUPPORTED_ALGORITHMS = old
+
+    def testGetByHash(self):
+        hashAlgorithm = 'sha512'
+        publicDataHash = self._hashSum(self.userData, hashAlgorithm)
+        privateDataHash = self._hashSum(self.privateOnlyData, hashAlgorithm)
+
+        # There are three files with publicDataHash for self.user .
+        resp = self.request(
+            '/file/hashsum/%s/%s' % (hashAlgorithm, publicDataHash), user=self.user)
+        self.assertStatusOk(resp)
+        self.assertEqual(len(resp.json), 3)
+        for file in resp.json:
+            self.assertEqual(file['sha512'], publicDataHash)
+
+        # There is one file with privateDataHash for self.user .
+        resp = self.request(
+            '/file/hashsum/%s/%s' % (hashAlgorithm, privateDataHash), user=self.user)
+        self.assertStatusOk(resp)
+        self.assertEqual(len(resp.json), 1)
+        for file in resp.json:
+            self.assertEqual(file['sha512'], privateDataHash)
+
+        # There are two files with publicDataHash for self.otherUser .
+        # There is one private file with this hash that otherUser lacks access to.
+        resp = self.request(
+            '/file/hashsum/%s/%s' % (hashAlgorithm, publicDataHash), user=self.otherUser)
+        self.assertStatusOk(resp)
+        self.assertEqual(len(resp.json), 2)
+        for file in resp.json:
+            self.assertEqual(file['sha512'], publicDataHash)
+
+        # No files with privateDataHash for self.otherUser .
+        resp = self.request(
+            '/file/hashsum/%s/%s' % (hashAlgorithm, privateDataHash), user=self.otherUser)
+        self.assertStatusOk(resp)
+        self.assertEqual(len(resp.json), 0)

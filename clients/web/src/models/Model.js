@@ -1,7 +1,8 @@
+import $ from 'jquery';
 import _ from 'underscore';
 import Backbone from 'backbone';
 
-import { restRequest, apiRoot } from 'girder/rest';
+import { restRequest, getApiRoot } from 'girder/rest';
 
 /**
  * All models should descend from this base model, which provides a number
@@ -41,8 +42,7 @@ var Model = Backbone.Model.extend({
      */
     save: function () {
         if (this.altUrl === null && this.resourceName === null) {
-            alert('Error: You must set an altUrl or resourceName on your model.');
-            return;
+            throw new Error('An altUrl or resourceName must be set on the Model.');
         }
 
         var path, type;
@@ -55,7 +55,7 @@ var Model = Backbone.Model.extend({
         }
         /* Don't save attributes which are objects using this call.  For
          * instance, if the metadata of an item has keys that contain non-ascii
-         * values, they won't get handled the the rest call. */
+         * values, they won't get handled by the rest call. */
         var data = {};
         _.each(this.keys(), function (key) {
             var value = this.get(key);
@@ -65,51 +65,55 @@ var Model = Backbone.Model.extend({
         }, this);
 
         return restRequest({
-            path: path,
-            type: type,
+            url: path,
+            method: type,
             data: data,
             error: null // don't do default error behavior (validation may fail)
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.set(resp);
             this.trigger('g:saved');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
     },
 
     /**
      * Fetch a single resource from the server. Triggers g:fetched on success,
      * or g:error on error.
-     * To ignore the default error handler, pass
-     *     ignoreError: true
-     * in your opts object.
+     *
+     * @param {object|undefined} opts: additional options, which can include:
+     *     ignoreError: true - ignore the default error handler
+     *     extraPath - a string to append to the end of the resource URL
+     *     data - a dictionary of parameters to pass to the endpoint.
      */
     fetch: function (opts) {
         if (this.altUrl === null && this.resourceName === null) {
-            alert('Error: You must set an altUrl or a resourceName on your model.');
-            return;
+            throw new Error('An altUrl or resourceName must be set on the Model.');
         }
 
         opts = opts || {};
         var restOpts = {
-            path: (this.altUrl || this.resourceName) + '/' + this.get('_id')
+            url: `${this.altUrl || this.resourceName}/${this.id}`
         };
         if (opts.extraPath) {
-            restOpts.path += '/' + opts.extraPath;
+            restOpts.url += '/' + opts.extraPath;
         }
         if (opts.ignoreError) {
             restOpts.error = null;
         }
-        return restRequest(restOpts).done(_.bind(function (resp) {
+        if (opts.data) {
+            restOpts.data = opts.data;
+        }
+        return restRequest(restOpts).done((resp) => {
             this.set(resp);
             if (opts.extraPath) {
                 this.trigger('g:fetched.' + opts.extraPath);
             } else {
                 this.trigger('g:fetched');
             }
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
     },
 
     /**
@@ -119,8 +123,7 @@ var Model = Backbone.Model.extend({
      *    query string.
      */
     downloadUrl: function (params) {
-        var url = apiRoot + '/' + (this.altUrl || this.resourceName) + '/' +
-            this.get('_id') + '/download';
+        let url = `${getApiRoot()}/${this.altUrl || this.resourceName}/${this.id}/download`;
 
         if (params) {
             url += '?' + $.param(params);
@@ -145,32 +148,31 @@ var Model = Backbone.Model.extend({
      */
     destroy: function (opts) {
         if (this.altUrl === null && this.resourceName === null) {
-            alert('Error: You must set an altUrl or a resourceName on your model.');
-            return;
+            throw new Error('An altUrl or resourceName must be set on the Model.');
         }
 
         var args = {
-            path: (this.altUrl || this.resourceName) + '/' + this.get('_id'),
-            type: 'DELETE'
+            url: `${this.altUrl || this.resourceName}/${this.id}`,
+            method: 'DELETE'
         };
 
         opts = opts || {};
         if (opts.progress === true) {
-            args.path += '?progress=true';
+            args.url += '?progress=true';
         }
 
         if (opts.throwError !== false) {
             args.error = null;
         }
 
-        return restRequest(args).done(_.bind(function () {
+        return restRequest(args).done(() => {
             if (this.collection) {
                 this.collection.remove(this);
             }
             this.trigger('g:deleted');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
     },
 
     /**

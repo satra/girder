@@ -25,7 +25,10 @@ from .. import base
 
 from girder import events
 from girder.constants import AccessType, SortDir
-from girder.models.notification import ProgressState
+from girder.models.notification import Notification, ProgressState
+from girder.models.folder import Folder
+from girder.models.item import Item
+from girder.models.user import User
 
 
 def setUpModule():
@@ -53,8 +56,7 @@ class FolderTestCase(base.TestCase):
             'lastName': 'Last',
             'password': 'goodpassword'
         })
-        self.admin, self.user =\
-            [self.model('user').createUser(**user) for user in users]
+        self.admin, self.user = [User().createUser(**user) for user in users]
 
     def testChildFolders(self):
         # Test with some bad parameters
@@ -67,8 +69,9 @@ class FolderTestCase(base.TestCase):
             'parentId': self.admin['_id']
         })
         self.assertStatus(resp, 400)
-        self.assertEqual(resp.json['message'],
-                         'The parentType must be user, collection, or folder.')
+        self.assertEqual(
+            resp.json['message'],
+            'Invalid value for parentType: "invalid". Allowed values: folder, user, collection.')
 
         # We should only be able to see the public folder if we are anonymous
         resp = self.request(path='/folder', method='GET', params={
@@ -79,8 +82,7 @@ class FolderTestCase(base.TestCase):
         self.assertEqual(len(resp.json), 1)
 
         # Test GET on the result folder
-        resp = self.request(
-            path='/folder/%s' % str(resp.json[0]['_id']))
+        resp = self.request(path='/folder/%s' % str(resp.json[0]['_id']))
         self.assertStatusOk(resp)
         self.assertIsInstance(resp.json, dict)
         self.assertFalse('access' in resp.json)
@@ -135,10 +137,8 @@ class FolderTestCase(base.TestCase):
 
         # Move should fail if we don't have write permission on the
         # destination parent
-        publicFolder = self.model('folder').load(
-            publicFolder['_id'], force=True)
-        publicFolder = self.model('folder').setUserAccess(
-            publicFolder, self.user, AccessType.WRITE, save=True)
+        publicFolder = Folder().load(publicFolder['_id'], force=True)
+        publicFolder = Folder().setUserAccess(publicFolder, self.user, AccessType.WRITE, save=True)
         resp = self.request(
             path='/folder/%s' % publicFolder['_id'], method='PUT',
             user=self.user, params={
@@ -202,9 +202,8 @@ class FolderTestCase(base.TestCase):
         self.assertEqual(resp.json['parentId'], publicFolder['_id'])
         self.assertEqual(resp.json['parentCollection'], 'folder')
         self.assertTrue(resp.json['public'])
-        folder = self.model('folder').load(resp.json['_id'], force=True)
-        self.assertTrue(self.model('folder').hasAccess(
-            folder, self.admin, AccessType.ADMIN))
+        folder = Folder().load(resp.json['_id'], force=True)
+        self.assertTrue(Folder().hasAccess(folder, self.admin, AccessType.ADMIN))
 
         # Now fetch the children of Public, we should see it
         resp = self.request(
@@ -232,6 +231,100 @@ class FolderTestCase(base.TestCase):
                 'parentId': str(self.admin['_id'])
             })
         self.assertStatus(resp, 200)
+
+    def testReuseExisting(self):
+        self.ensureRequiredParams(
+            path='/folder', method='POST', required=['name', 'parentId'],
+            user=self.admin)
+
+        # Grab the default user folders
+        resp = self.request(
+            path='/folder', method='GET', user=self.admin, params={
+                'parentType': 'user',
+                'parentId': self.admin['_id'],
+                'sort': 'name',
+                'sortdir': 1
+            })
+        publicFolder = resp.json[1]
+
+        # Actually create subfolder under Public
+        newFolder = self.request(
+            path='/folder', method='POST', user=self.admin, params={
+                'name': ' My public subfolder  ',
+                'parentId': publicFolder['_id']
+            })
+        self.assertStatusOk(newFolder)
+
+        # Try to create a folder with same name, reuseExisting flag not set
+        resp = self.request(
+            path='/folder', method='POST', user=self.admin, params={
+                'name': ' My public subfolder  ',
+                'parentId': publicFolder['_id']
+            })
+        self.assertValidationError(resp, 'name')
+
+        # Create folder with same name, reuseExisting flag set
+        reuseFolder = self.request(
+            path='/folder', method='POST', user=self.admin, params={
+                'name': ' My public subfolder  ',
+                'parentId': publicFolder['_id'],
+                'reuseExisting': True
+            })
+        self.assertStatusOk(reuseFolder)
+        self.assertEqual(newFolder.json['_id'], reuseFolder.json['_id'])
+
+    def testFolderMetadataDirect(self):
+        resp = self.request(
+            path='/folder', method='GET', user=self.admin, params={
+                'parentType': 'user',
+                'parentId': self.admin['_id'],
+                'sort': 'name',
+                'sortdir': 1
+            })
+        self.assertStatusOk(resp)
+        publicFolder = resp.json[1]
+
+        # Actually create subfolder under Public
+        resp = self.request(
+            path='/folder', method='POST', user=self.admin, params={
+                'name': ' My public subfolder  ',
+                'parentId': publicFolder['_id'],
+                'metadata': 'invalid json'
+            })
+        self.assertStatus(resp, 400)
+        self.assertEqual(
+            resp.json['message'],
+            'Parameter metadata must be valid JSON.')
+
+        metadata = {
+            'foo': 'bar',
+            'test': 2
+        }
+        resp = self.request(
+            path='/folder', method='POST', user=self.admin, params={
+                'name': ' My public subfolder with meta',
+                'parentId': publicFolder['_id'],
+                'metadata': json.dumps(metadata)}
+        )
+        self.assertStatusOk(resp)
+        folder = resp.json
+        self.assertEqual(folder['meta']['foo'], metadata['foo'])
+        self.assertEqual(folder['meta']['test'], metadata['test'])
+
+        metadata = {
+            'foo': None,
+            'test': 3,
+            'bar': 'baz'
+        }
+        resp = self.request(
+            path='/folder/{_id}'.format(**folder), method='PUT',
+            user=self.admin, params={'metadata': json.dumps(metadata)}
+        )
+        self.assertStatusOk(resp)
+        folder = resp.json
+        self.assertNotHasKeys(folder['meta'], ['foo'])
+        self.assertEqual(folder['meta']['test'], metadata['test'])
+        self.assertEqual(folder['meta']['bar'], metadata['bar'])
 
     def testFolderMetadataCrud(self):
         """
@@ -296,12 +389,10 @@ class FolderTestCase(base.TestCase):
                             method='PUT', user=self.admin,
                             body=json.dumps(metadata), type='application/json')
         self.assertStatus(resp, 400)
-        self.assertEqual(resp.json['message'],
-                         'The key name foo.bar must not contain a period' +
-                         ' or begin with a dollar sign.')
+        self.assertEqual(
+            resp.json['message'], 'Invalid key foo.bar: keys must not contain the "." character.')
 
-        # Make sure metadata cannot be added if the key begins with a
-        # dollar sign
+        # Make sure metadata cannot be added if the key begins with a $
         metadata = {
             '$foobar': 'alsonotallowed'
         }
@@ -309,9 +400,26 @@ class FolderTestCase(base.TestCase):
                             method='PUT', user=self.admin,
                             body=json.dumps(metadata), type='application/json')
         self.assertStatus(resp, 400)
-        self.assertEqual(resp.json['message'],
-                         'The key name $foobar must not contain a period' +
-                         ' or begin with a dollar sign.')
+        self.assertEqual(
+            resp.json['message'],
+            'Invalid key $foobar: keys must not start with the "$" character.')
+
+        # Test allowNull
+        metadata = {
+            'foo': None
+        }
+        resp = self.request(
+            path='/folder/%s/metadata' % folder['_id'], params={'allowNull': True},
+            user=self.admin, method='PUT', body=json.dumps(metadata), type='application/json')
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['meta'], metadata)
+
+        # Test delete metadata endpoint
+        resp = self.request(
+            path='/folder/%s/metadata' % folder['_id'], user=self.admin, method='DELETE',
+            body=json.dumps(['foo']), type='application/json')
+        self.assertStatusOk(resp)
+        self.assertEqual(resp.json['meta'], {})
 
     def testDeleteFolder(self):
         cbInfo = {}
@@ -329,16 +437,15 @@ class FolderTestCase(base.TestCase):
             self.assertStatus(resp, 400)
 
             # Grab one of the user's top level folders
-            folders = self.model('folder').childFolders(
+            folders = Folder().childFolders(
                 parent=self.admin, parentType='user', user=self.admin, limit=1,
                 sort=[('name', SortDir.DESCENDING)])
             folderResp = six.next(folders)
 
             # Add a subfolder and an item to that folder
-            subfolder = self.model('folder').createFolder(
+            subfolder = Folder().createFolder(
                 folderResp, 'sub', parentType='folder', creator=self.admin)
-            item = self.model('item').createItem(
-                'item', creator=self.admin, folder=subfolder)
+            item = Item().createItem('item', creator=self.admin, folder=subfolder)
 
             self.assertTrue('_id' in subfolder)
             self.assertTrue('_id' in item)
@@ -351,16 +458,16 @@ class FolderTestCase(base.TestCase):
             self.assertStatusOk(resp)
 
             # Make sure the folder, its subfolder, and its item were all deleted
-            folder = self.model('folder').load(folderResp['_id'], force=True)
-            subfolder = self.model('folder').load(subfolder['_id'], force=True)
-            item = self.model('item').load(item['_id'])
+            folder = Folder().load(folderResp['_id'], force=True)
+            subfolder = Folder().load(subfolder['_id'], force=True)
+            item = Item().load(item['_id'])
 
             self.assertEqual(folder, None)
             self.assertEqual(subfolder, None)
             self.assertEqual(item, None)
 
             # Make sure progress record exists and that it is set to expire soon
-            notifs = list(self.model('notification').get(self.admin))
+            notifs = list(Notification().get(self.admin))
             self.assertEqual(len(notifs), 1)
             self.assertEqual(notifs[0]['type'], 'progress')
             self.assertEqual(notifs[0]['data']['state'], ProgressState.SUCCESS)
@@ -379,17 +486,15 @@ class FolderTestCase(base.TestCase):
             self.assertEqual(cbInfo['doc']['_id'], folderResp['_id'])
 
     def testCleanFolder(self):
-        folder = six.next(self.model('folder').childFolders(
+        folder = six.next(Folder().childFolders(
             parent=self.admin, parentType='user', user=self.admin, limit=1,
             sort=[('name', SortDir.DESCENDING)]))
 
         # Add some data under the folder
-        subfolder = self.model('folder').createFolder(
+        subfolder = Folder().createFolder(
             folder, 'sub', parentType='folder', creator=self.admin)
-        item = self.model('item').createItem(
-            'item', creator=self.admin, folder=folder)
-        subitem = self.model('item').createItem(
-            'item', creator=self.admin, folder=subfolder)
+        item = Item().createItem('item', creator=self.admin, folder=folder)
+        subitem = Item().createItem('item', creator=self.admin, folder=subfolder)
 
         # Clean the folder contents
         resp = self.request(path='/folder/%s/contents' % folder['_id'],
@@ -400,11 +505,10 @@ class FolderTestCase(base.TestCase):
 
         # Make sure the subfolder and items were deleted, but that the top
         # folder still exists.
-        old, folder = folder, self.model('folder').load(folder['_id'],
-                                                        force=True)
-        subfolder = self.model('folder').load(subfolder['_id'], force=True)
-        item = self.model('item').load(item['_id'])
-        subitem = self.model('item').load(subitem['_id'])
+        old, folder = folder, Folder().load(folder['_id'], force=True)
+        subfolder = Folder().load(subfolder['_id'], force=True)
+        item = Item().load(item['_id'])
+        subitem = Item().load(subitem['_id'])
 
         self.assertTrue('_id' in folder)
         self.assertEqual(folder, old)
@@ -418,7 +522,7 @@ class FolderTestCase(base.TestCase):
         derived fields (like lowerName or baseParentId) get those values
         computed at load() time.
         """
-        folder = self.model('folder').createFolder(
+        folder = Folder().createFolder(
             parent=self.admin, parentType='user', creator=self.admin,
             name=' My Folder Name')
 
@@ -429,15 +533,15 @@ class FolderTestCase(base.TestCase):
         # fields
         del folder['lowerName']
         del folder['baseParentType']
-        folder = self.model('folder').save(folder, validate=False)
+        folder = Folder().save(folder, validate=False)
 
-        folder = self.model('folder').find({'_id': folder['_id']})[0]
+        folder = Folder().find({'_id': folder['_id']})[0]
         self.assertNotHasKeys(folder, ('lowerName', 'baseParentType'))
 
         # Now ensure that calling load() actually populates those fields and
         # saves the results persistently
-        self.model('folder').load(folder['_id'], force=True)
-        folder = self.model('folder').find({'_id': folder['_id']})[0]
+        Folder().load(folder['_id'], force=True)
+        folder = Folder().find({'_id': folder['_id']})[0]
         self.assertHasKeys(folder, ('lowerName', 'baseParentType'))
         self.assertEqual(folder['lowerName'], 'my folder name')
         self.assertEqual(folder['baseParentType'], 'user')
@@ -448,37 +552,37 @@ class FolderTestCase(base.TestCase):
         Demonstrate that forcing parentsToRoot will cause it to skip the
         filtering process.
         """
-        userFolder = self.model('folder').createFolder(
+        userFolder = Folder().createFolder(
             parent=self.admin, parentType='user', creator=self.admin,
             name=' My Folder Name')
 
         # Filtering adds the _accessLevel key to the object
         # So forcing should result in an absence of that key
-        parents = self.model('folder').parentsToRoot(userFolder, force=True)
+        parents = Folder().parentsToRoot(userFolder, force=True)
         for parent in parents:
             self.assertNotIn('_accessLevel', parent['object'])
 
-        parents = self.model('folder').parentsToRoot(userFolder)
+        parents = Folder().parentsToRoot(userFolder)
         for parent in parents:
             self.assertIn('_accessLevel', parent['object'])
 
         # The logic is a bit different for user/collection parents,
         # so we need to handle the other case
-        subFolder = self.model('folder').createFolder(
+        subFolder = Folder().createFolder(
             parent=userFolder, parentType='folder', creator=self.admin,
             name=' My Subfolder Name')
 
-        parents = self.model('folder').parentsToRoot(subFolder, force=True)
+        parents = Folder().parentsToRoot(subFolder, force=True)
         for parent in parents:
             self.assertNotIn('_accessLevel', parent['object'])
 
-        parents = self.model('folder').parentsToRoot(subFolder, user=self.admin)
+        parents = Folder().parentsToRoot(subFolder, user=self.admin)
         for parent in parents:
             self.assertIn('_accessLevel', parent['object'])
 
     def testFolderAccessAndDetails(self):
         # create a folder to work with
-        folder = self.model('folder').createFolder(
+        folder = Folder().createFolder(
             parent=self.admin, parentType='user', creator=self.admin,
             name='Folder')
 
@@ -516,13 +620,12 @@ class FolderTestCase(base.TestCase):
         self.assertEqual(resp.json['public'], True)
 
         # Create an item in the folder
-        self.model('item').createItem(
-            folder=folder, creator=self.admin, name='Item')
+        Item().createItem(folder=folder, creator=self.admin, name='Item')
         # Create a public and private folder within the folder
-        self.model('folder').createFolder(
+        Folder().createFolder(
             parent=folder, parentType='folder', creator=self.admin,
             name='Public', public=True)
-        self.model('folder').createFolder(
+        Folder().createFolder(
             parent=folder, parentType='folder', creator=self.admin,
             name='Private', public=False)
 
@@ -542,16 +645,14 @@ class FolderTestCase(base.TestCase):
 
     def testFolderCopy(self):
         # create a folder with a subfolder, items, and metadata
-        mainFolder = self.model('folder').createFolder(
+        mainFolder = Folder().createFolder(
             parent=self.admin, parentType='user', creator=self.admin,
             name='Main Folder')
-        subFolder = self.model('folder').createFolder(
+        subFolder = Folder().createFolder(
             parent=mainFolder, parentType='folder', creator=self.admin,
             name='Sub Folder')
-        mainItem = self.model('item').createItem(
-            'Main Item', creator=self.admin, folder=mainFolder)
-        subItem = self.model('item').createItem(
-            'Sub Item', creator=self.admin, folder=subFolder)
+        mainItem = Item().createItem('Main Item', creator=self.admin, folder=mainFolder)
+        subItem = Item().createItem('Sub Item', creator=self.admin, folder=subFolder)
         metadata = {'key': 'value'}
         resp = self.request(
             path='/folder/%s/metadata' % mainFolder['_id'], method='PUT',
@@ -563,7 +664,7 @@ class FolderTestCase(base.TestCase):
         self.uploadFile(
             name='test.txt', contents='.' * size, user=self.admin,
             parent=mainItem, parentType='item')
-        mainFolder = self.model('folder').load(mainFolder['_id'], force=True)
+        mainFolder = Folder().load(mainFolder['_id'], force=True)
         self.assertEqual(mainFolder['size'], size)
 
         # Now copy the folder alongside itself
@@ -638,4 +739,10 @@ class FolderTestCase(base.TestCase):
                 'progress': True,
                 'parentType': 'folder',
                 'parentId': str(subFolder['_id'])})
+        self.assertStatusOk(resp)
+
+        # Test copying with public set to False
+        resp = self.request(
+            path='/folder/%s/copy' % subFolder['_id'], method='POST',
+            user=self.admin, params={'public': 'false', 'progress': True})
         self.assertStatusOk(resp)

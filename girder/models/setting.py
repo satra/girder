@@ -21,12 +21,14 @@ from collections import OrderedDict
 import cherrypy
 import pymongo
 import six
+import re
 
 from ..constants import GIRDER_ROUTE_ID, GIRDER_STATIC_ROUTE_ID, SettingDefault, SettingKey
-from .model_base import Model, ValidationException
+from .model_base import Model
 from girder import logprint
-from girder.utility import plugin_utilities, setting_utilities
-from girder.utility.model_importer import ModelImporter
+from girder.exceptions import ValidationException
+from girder.utility import config, setting_utilities
+from girder.utility._cache import cache
 from bson.objectid import ObjectId
 
 
@@ -97,6 +99,14 @@ class Setting(Model):
 
         return doc
 
+    @cache.cache_on_arguments()
+    def _get(self, key):
+        """
+        This method is so built in caching decorators can be used without specifying
+        custom logic for dealing with the default kwarg of self.get.
+        """
+        return self.findOne({'key': key})
+
     def get(self, key, default='__default__'):
         """
         Retrieve a setting by its key.
@@ -106,7 +116,8 @@ class Setting(Model):
         :param default: If no such setting exists, returns this value instead.
         :returns: The value, or the default value if the key is not found.
         """
-        setting = self.findOne({'key': key})
+        setting = self._get(key)
+
         if setting is None:
             if default is '__default__':
                 default = self.getDefault(key)
@@ -133,7 +144,11 @@ class Setting(Model):
         else:
             setting['value'] = value
 
-        return self.save(setting)
+        setting = self.save(setting)
+
+        self._get.set(setting, self, key)
+
+        return setting
 
     def unset(self, key):
         """
@@ -143,6 +158,7 @@ class Setting(Model):
         :param key: The key identifying the setting to be removed.
         :type key: str
         """
+        self._get.invalidate(self, key)
         for setting in self.find({'key': key}):
             self.remove(setting)
 
@@ -165,6 +181,31 @@ class Setting(Model):
         return None
 
     @staticmethod
+    @setting_utilities.validator(SettingKey.BRAND_NAME)
+    def validateCoreBrandName(doc):
+        if not doc['value']:
+            raise ValidationException('The brand name may not be empty', 'value')
+
+    @staticmethod
+    @setting_utilities.validator(SettingKey.BANNER_COLOR)
+    def validateCoreBannerColor(doc):
+        if not doc['value']:
+            raise ValidationException('The banner color may not be empty', 'value')
+        elif not (re.match(r'^#[0-9A-Fa-f]{6}$', doc['value'])):
+            raise ValidationException('The banner color must be a hex color triplet', 'value')
+
+    @staticmethod
+    @setting_utilities.validator(SettingKey.SECURE_COOKIE)
+    def validateSecureCookie(doc):
+        if not isinstance(doc['value'], bool):
+            raise ValidationException('Secure cookie option must be boolean.', 'value')
+
+    @staticmethod
+    @setting_utilities.default(SettingKey.SECURE_COOKIE)
+    def defaultSecureCookie():
+        return config.getConfig()['server']['mode'] == 'production'
+
+    @staticmethod
     @setting_utilities.validator(SettingKey.PLUGINS_ENABLED)
     def validateCorePluginsEnabled(doc):
         """
@@ -172,6 +213,8 @@ class Setting(Model):
         names. Removes any invalid plugin names, removes duplicates, and adds
         all transitive dependencies to the enabled list.
         """
+        from girder.utility import plugin_utilities
+
         if not isinstance(doc['value'], list):
             raise ValidationException('Plugins enabled setting must be a list.', 'value')
 
@@ -190,17 +233,20 @@ class Setting(Model):
     @staticmethod
     @setting_utilities.validator(SettingKey.COLLECTION_CREATE_POLICY)
     def validateCoreCollectionCreatePolicy(doc):
+        from .group import Group
+        from .user import User
+
         value = doc['value']
 
         if not isinstance(value, dict):
             raise ValidationException('Collection creation policy must be a JSON object.')
 
         for i, groupId in enumerate(value.get('groups', ())):
-            ModelImporter.model('group').load(groupId, force=True, exc=True)
+            Group().load(groupId, force=True, exc=True)
             value['groups'][i] = ObjectId(value['groups'][i])
 
         for i, userId in enumerate(value.get('users', ())):
-            ModelImporter.model('user').load(userId, force=True, exc=True)
+            User().load(userId, force=True, exc=True)
             value['users'][i] = ObjectId(value['users'][i])
 
         value['open'] = value.get('open', False)
@@ -215,6 +261,13 @@ class Setting(Model):
         except ValueError:
             pass  # We want to raise the ValidationException
         raise ValidationException('Cookie lifetime must be an integer > 0.', 'value')
+
+    @staticmethod
+    @setting_utilities.validator(SettingKey.SERVER_ROOT)
+    def validateCoreServerRoot(doc):
+        val = doc['value']
+        if val and not val.startswith('http://') and not val.startswith('https://'):
+            raise ValidationException('Server root must start with http:// or https://.', 'value')
 
     @staticmethod
     @setting_utilities.validator(SettingKey.CORS_ALLOW_METHODS)
@@ -261,6 +314,12 @@ class Setting(Model):
             raise ValidationException('Email from address must not be blank.', 'value')
 
     @staticmethod
+    @setting_utilities.validator(SettingKey.CONTACT_EMAIL_ADDRESS)
+    def validateCoreContactEmailAddress(doc):
+        if not doc['value']:
+            raise ValidationException('Contact email address must not be blank.', 'value')
+
+    @staticmethod
     @setting_utilities.validator(SettingKey.EMAIL_HOST)
     def validateCoreEmailHost(doc):
         if isinstance(doc['value'], six.string_types):
@@ -294,14 +353,34 @@ class Setting(Model):
                 'Email verification must be "required", "optional", or "disabled".', 'value')
 
     @staticmethod
+    @setting_utilities.validator(SettingKey.API_KEYS)
+    def validateApiKeys(doc):
+        if not isinstance(doc['value'], bool):
+            raise ValidationException('API key setting must be boolean.', 'value')
+
+    @staticmethod
+    @setting_utilities.validator(SettingKey.ENABLE_PASSWORD_LOGIN)
+    def validateEnablePasswordLogin(doc):
+        if not isinstance(doc['value'], bool):
+            raise ValidationException('Enable password login setting must be boolean.', 'value')
+
+    @staticmethod
     @setting_utilities.validator(SettingKey.ROUTE_TABLE)
     def validateCoreRouteTable(doc):
         nonEmptyRoutes = [route for route in doc['value'].values() if route]
-        if GIRDER_ROUTE_ID not in doc['value'] or not doc['value'][GIRDER_ROUTE_ID]:
-            raise ValidationException('Girder must be routeable.')
+        for key in [GIRDER_ROUTE_ID, GIRDER_STATIC_ROUTE_ID]:
+            if key not in doc['value'] or not doc['value'][key]:
+                raise ValidationException('Girder and static root must be routable.')
 
-        if not all(route.startswith('/') for route in nonEmptyRoutes):
-            raise ValidationException('Routes must begin with a forward slash.')
+        for key in doc['value']:
+            if (key != GIRDER_STATIC_ROUTE_ID and doc['value'][key] and
+                    not doc['value'][key].startswith('/')):
+                raise ValidationException('Routes must begin with a forward slash.')
+        if doc['value'].get(GIRDER_STATIC_ROUTE_ID):
+            if (not doc['value'][GIRDER_STATIC_ROUTE_ID].startswith('/') and
+                    '://' not in doc['value'][GIRDER_STATIC_ROUTE_ID]):
+                raise ValidationException(
+                    'Static root must begin with a forward slash or contain a URL scheme.')
 
         if len(nonEmptyRoutes) > len(set(nonEmptyRoutes)):
             raise ValidationException('Routes must be unique.')

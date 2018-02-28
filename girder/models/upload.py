@@ -21,10 +21,13 @@ import datetime
 import six
 from bson.objectid import ObjectId
 
-from girder import events
+from girder import events, logger
+from girder.api import rest
 from girder.constants import SettingKey
-from girder.utility import assetstore_utilities
-from .model_base import Model, GirderException, ValidationException
+from .model_base import Model
+from girder.exceptions import GirderException, ValidationException
+from girder.utility import RequestBodyStream
+from girder.utility.progress import noProgress
 
 
 class Upload(Model):
@@ -35,6 +38,7 @@ class Upload(Model):
     """
     def initialize(self):
         self.name = 'upload'
+        self.ensureIndex('sha512')
 
     def _getChunkSize(self, minSize=32 * 1024**2):
         """
@@ -44,7 +48,8 @@ class Upload(Model):
         :param minSize: the minimum size to return.
         :return: chunk size to use for file uploads.
         """
-        minChunkSize = self.model('setting').get(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE)
+        from .setting import Setting
+        minChunkSize = Setting().get(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE)
         return max(minChunkSize, minSize)
 
     def uploadFromFile(self, obj, size, name, parentType=None, parent=None,
@@ -59,8 +64,7 @@ class Upload(Model):
             size = os.path.getsize(filename)
 
             with open(filename, 'rb') as f:
-                self.model('upload').uploadFromFile(
-                    f, size, filename, 'item', parentItem, user)
+                Upload().uploadFromFile(f, size, filename, 'item', parentItem, user)
 
         :param obj: The object representing the content to upload.
         :type obj: file-like
@@ -76,7 +80,7 @@ class Upload(Model):
         :param mimeType: MIME type of the file.
         :type mimeType: str
         :param reference: An optional reference string that will be sent to the
-                          data.process event.
+            data.process event.
         :param assetstore: An optional assetstore to use to store the file.  If
             unspecified, the current assetstore is used.
         :type reference: str
@@ -100,7 +104,7 @@ class Upload(Model):
             if not data:
                 break
 
-            upload = self.handleChunk(upload, six.BytesIO(data))
+            upload = self.handleChunk(upload, RequestBodyStream(six.BytesIO(data), size))
 
         return upload
 
@@ -114,25 +118,45 @@ class Upload(Model):
 
         return doc
 
-    def handleChunk(self, upload, chunk):
+    def handleChunk(self, upload, chunk, filter=False, user=None):
         """
         When a chunk is uploaded, this should be called to process the chunk.
         If this is the final chunk of the upload, this method will finalize
         the upload automatically.
 
+        This method will return EITHER an upload or a file document. If this
+        is the final chunk of the upload, the upload is finalized and the created
+        file document is returned. Otherwise, it returns the upload document
+        with the relevant fields modified.
+
         :param upload: The upload document to update.
         :type upload: dict
         :param chunk: The file object representing the chunk that was uploaded.
         :type chunk: file
+        :param filter: Whether the model should be filtered. Only affects
+            behavior when returning a file model, not the upload model.
+        :type filter: bool
+        :param user: The current user. Only affects behavior if filter=True.
+        :type user: dict or None
         """
-        assetstore = self.model('assetstore').load(upload['assetstoreId'])
+        from .assetstore import Assetstore
+        from .file import File
+        from girder.utility import assetstore_utilities
+
+        assetstore = Assetstore().load(upload['assetstoreId'])
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
 
-        upload = self.save(adapter.uploadChunk(upload, chunk))
+        upload = adapter.uploadChunk(upload, chunk)
+        if '_id' in upload or upload['received'] != upload['size']:
+            upload = self.save(upload)
 
         # If upload is finished, we finalize it
         if upload['received'] == upload['size']:
-            return self.finalizeUpload(upload, assetstore)
+            file = self.finalizeUpload(upload, assetstore)
+            if filter:
+                return File().filter(file, user=user)
+            else:
+                return file
         else:
             return upload
 
@@ -141,7 +165,10 @@ class Upload(Model):
         Requests the offset that should be used to resume uploading. This
         makes the request from the assetstore adapter.
         """
-        assetstore = self.model('assetstore').load(upload['assetstoreId'])
+        from .assetstore import Assetstore
+        from girder.utility import assetstore_utilities
+
+        assetstore = Assetstore().load(upload['assetstoreId'])
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
         return adapter.requestOffset(upload)
 
@@ -156,42 +183,48 @@ class Upload(Model):
         :type assetstore: dict
         :returns: The file object that was created.
         """
+        from .assetstore import Assetstore
+        from .file import File
+        from .item import Item
+        from girder.utility import assetstore_utilities
+
         events.trigger('model.upload.finalize', upload)
         if assetstore is None:
-            assetstore = self.model('assetstore').load(upload['assetstoreId'])
+            assetstore = Assetstore().load(upload['assetstoreId'])
 
         if 'fileId' in upload:  # Updating an existing file's contents
-            file = self.model('file').load(upload['fileId'], force=True)
+            file = File().load(upload['fileId'], force=True)
 
             # Delete the previous file contents from the containing assetstore
             assetstore_utilities.getAssetstoreAdapter(
-                self.model('assetstore').load(
-                    file['assetstoreId'])).deleteFile(file)
+                Assetstore().load(file['assetstoreId'])).deleteFile(file)
 
-            item = self.model('item').load(file['itemId'], force=True)
-            self.model('file').propagateSizeChange(
-                item, upload['size'] - file['size'])
+            item = Item().load(file['itemId'], force=True)
+            File().propagateSizeChange(item, upload['size'] - file['size'])
 
             # Update file info
             file['creatorId'] = upload['userId']
             file['created'] = datetime.datetime.utcnow()
             file['assetstoreId'] = assetstore['_id']
             file['size'] = upload['size']
+            # If the file was previously imported, it is no longer.
+            if file.get('imported'):
+                file['imported'] = False
+
         else:  # Creating a new file record
             if upload.get('attachParent'):
                 item = None
             elif upload['parentType'] == 'folder':
                 # Create a new item with the name of the file.
-                item = self.model('item').createItem(
+                item = Item().createItem(
                     name=upload['name'], creator={'_id': upload['userId']},
                     folder={'_id': upload['parentId']})
             elif upload['parentType'] == 'item':
-                item = self.model('item').load(
-                    id=upload['parentId'], force=True)
+                item = Item().load(id=upload['parentId'], force=True)
             else:
                 item = None
 
-            file = self.model('file').createFile(
+            file = File().createFile(
                 item=item, name=upload['name'], size=upload['size'],
                 creator={'_id': upload['userId']}, assetstore=assetstore,
                 mimeType=upload['mimeType'], saveFile=False)
@@ -205,14 +238,20 @@ class Upload(Model):
 
         event_document = {'file': file, 'upload': upload}
         events.trigger('model.file.finalizeUpload.before', event_document)
-        file = self.model('file').save(file)
+        file = File().save(file)
         events.trigger('model.file.finalizeUpload.after', event_document)
-        self.remove(upload)
+        if '_id' in upload:
+            self.remove(upload)
+
+        logger.info('Upload complete. Upload=%s File=%s User=%s' % (
+            upload['_id'], file['_id'], upload['userId']))
 
         # Add an async event for handlers that wish to process this file.
         eventParams = {
             'file': file,
-            'assetstore': assetstore
+            'assetstore': assetstore,
+            'currentToken': rest.getCurrentToken(),
+            'currentUser': rest.getCurrentUser()
         }
         if 'reference' in upload:
             eventParams['reference'] = upload['reference']
@@ -229,17 +268,19 @@ class Upload(Model):
 
         :param modelType: the type of the resource that will be stored.
         :param resource: the resource to be stored.
-        :param assetstore: if specified, the prefered assetstore where the
+        :param assetstore: if specified, the preferred assetstore where the
             resource should be located.  This may be overridden.
         :returns: the selected assetstore.
         """
+        from .assetstore import Assetstore
+
         eventParams = {'model': modelType, 'resource': resource}
         event = events.trigger('model.upload.assetstore', eventParams)
 
         if event.responses:
             assetstore = event.responses[-1]
         elif not assetstore:
-            assetstore = self.model('assetstore').getCurrent()
+            assetstore = Assetstore().getCurrent()
 
         return assetstore
 
@@ -261,6 +302,8 @@ class Upload(Model):
         :param assetstore: An optional assetstore to use to store the file.  If
             unspecified, the current assetstore is used.
         """
+        from girder.utility import assetstore_utilities
+
         assetstore = self.getTargetAssetstore('file', file, assetstore)
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
         now = datetime.datetime.utcnow()
@@ -282,7 +325,8 @@ class Upload(Model):
         return self.save(upload)
 
     def createUpload(self, user, name, parentType, parent, size, mimeType=None,
-                     reference=None, assetstore=None, attachParent=False):
+                     reference=None, assetstore=None, attachParent=False,
+                     save=True):
         """
         Creates a new upload record, and creates its temporary file
         that the chunks will be written into. Chunks should then be sent
@@ -312,8 +356,12 @@ class Upload(Model):
             appear as direct children of the parent, but are still associated
             with it.
         :type attachParent: boolean
+        :param save: if True, save the document after it is created.
+        :type save: boolean
         :returns: The upload document that was created.
         """
+        from girder.utility import assetstore_utilities
+
         assetstore = self.getTargetAssetstore(parentType, parent, assetstore)
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
         now = datetime.datetime.utcnow()
@@ -347,9 +395,11 @@ class Upload(Model):
             upload['userId'] = None
 
         upload = adapter.initUpload(upload)
-        return self.save(upload)
+        if save:
+            upload = self.save(upload)
+        return upload
 
-    def moveFileToAssetstore(self, file, user, assetstore):
+    def moveFileToAssetstore(self, file, user, assetstore, progress=noProgress):
         """
         Move a file from whatever assetstore it is located in to a different
         assetstore.  This is done by downloading and re-uploading the file.
@@ -357,9 +407,12 @@ class Upload(Model):
         :param file: the file to move.
         :param user: the user that is authorizing the move.
         :param assetstore: the destination assetstore.
+        :param progress: optional progress context.
         :returns: the original file if it is not moved, or the newly 'uploaded'
             file if it is.
         """
+        from .file import File
+
         if file['assetstoreId'] == assetstore['_id']:
             return file
         # Allow an event to cancel the move.  This could be done, for instance,
@@ -374,21 +427,24 @@ class Upload(Model):
         upload = self.createUploadToFile(
             file=file, user=user, size=int(file['size']), assetstore=assetstore)
         if file['size'] == 0:
-            return self.model('file').filter(
-                self.model('upload').finalizeUpload(upload), user)
+            return File().filter(self.finalizeUpload(upload), user)
         # Uploads need to be chunked for some assetstores
         chunkSize = self._getChunkSize()
         chunk = None
-        for data in self.model('file').download(file, headers=False)():
+        for data in File().download(file, headers=False)():
             if chunk is not None:
                 chunk += data
             else:
                 chunk = data
             if len(chunk) >= chunkSize:
-                upload = self.handleChunk(upload, six.BytesIO(chunk))
+                upload = self.handleChunk(upload, RequestBodyStream(six.BytesIO(chunk), len(chunk)))
+                progress.update(increment=len(chunk))
                 chunk = None
+
         if chunk is not None:
-            upload = self.handleChunk(upload, six.BytesIO(chunk))
+            upload = self.handleChunk(upload, RequestBodyStream(six.BytesIO(chunk), len(chunk)))
+            progress.update(increment=len(chunk))
+
         return upload
 
     def list(self, limit=0, offset=0, sort=None, filters=None):
@@ -430,7 +486,10 @@ class Upload(Model):
         :param upload: The upload document to remove.
         :type upload: dict
         """
-        assetstore = self.model('assetstore').load(upload['assetstoreId'])
+        from .assetstore import Assetstore
+        from girder.utility import assetstore_utilities
+
+        assetstore = Assetstore().load(upload['assetstoreId'])
         # If the assetstore was deleted, the upload may still be in our
         # database
         if assetstore:
@@ -440,7 +499,8 @@ class Upload(Model):
             except ValidationException:
                 # this assetstore is currently unreachable, so skip it
                 pass
-        self.model('upload').remove(upload)
+        if '_id' in upload:
+            self.remove(upload)
 
     def untrackedUploads(self, action='list', assetstoreId=None):
         """
@@ -455,10 +515,13 @@ class Upload(Model):
         :type assetstoreId: str
         :returns: a list of items that were removed or could be removed.
         """
+        from .assetstore import Assetstore
+        from girder.utility import assetstore_utilities
+
         results = []
         knownUploads = list(self.list())
         # Iterate through all assetstores
-        for assetstore in self.model('assetstore').list():
+        for assetstore in Assetstore().list():
             if assetstoreId and assetstoreId != assetstore['_id']:
                 continue
             adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)

@@ -6,23 +6,23 @@ var MetadataMixin = {
     _sendMetadata: function (metadata, successCallback, errorCallback, opts) {
         opts = opts || {};
         restRequest({
-            path: opts.path ||
-                ((this.altUrl || this.resourceName) + '/' + this.get('_id') + '/metadata'),
+            url: opts.path ||
+                ((this.altUrl || this.resourceName) + `/${this.id}/metadata?allowNull=true`),
             contentType: 'application/json',
             data: JSON.stringify(metadata),
-            type: 'PUT',
+            method: 'PUT',
             error: null
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.set(opts.field || 'meta', resp.meta);
             if (_.isFunction(successCallback)) {
                 successCallback();
             }
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             err.message = err.responseJSON.message;
             if (_.isFunction(errorCallback)) {
                 errorCallback(err);
             }
-        }, this));
+        });
     },
 
     addMetadata: function (key, value, successCallback, errorCallback, opts) {
@@ -40,9 +40,27 @@ var MetadataMixin = {
     },
 
     removeMetadata: function (key, successCallback, errorCallback, opts) {
-        var datum = {};
-        datum[key] = null;
-        this._sendMetadata(datum, successCallback, errorCallback, opts);
+        if (!_.isArray(key)) {
+            key = [key];
+        }
+        restRequest({
+            url: opts.path ||
+                ((this.altUrl || this.resourceName) + `/${this.id}/metadata`),
+            contentType: 'application/json',
+            data: JSON.stringify(key),
+            method: 'DELETE',
+            error: null
+        }).done((resp) => {
+            this.set(opts.field || 'meta', resp.meta);
+            if (_.isFunction(successCallback)) {
+                successCallback();
+            }
+        }).fail((err) => {
+            err.message = err.responseJSON.message;
+            if (_.isFunction(errorCallback)) {
+                errorCallback(err);
+            }
+        });
     },
 
     editMetadata: function (newKey, oldKey, value, successCallback, errorCallback, opts) {
@@ -68,4 +86,3 @@ var MetadataMixin = {
 };
 
 export default MetadataMixin;
-

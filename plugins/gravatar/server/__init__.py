@@ -22,14 +22,11 @@ import hashlib
 
 from girder import events
 from girder.api import access
-from girder.api.describe import Description, describeRoute
-from girder.api.rest import loadmodel
+from girder.api.describe import Description, autoDescribeRoute
 from girder.models.model_base import AccessType
+from girder.models.setting import Setting
+from girder.models.user import User
 from girder.utility import setting_utilities
-from girder.utility.model_importer import ModelImporter
-
-
-_cachedDefaultImage = None
 
 
 class PluginSettings(object):
@@ -42,30 +39,24 @@ def computeBaseUrl(user):
     current default image is cached in this URL. It is the caller's
     responsibility to save this value on the user document.
     """
-    global _cachedDefaultImage
-    if _cachedDefaultImage is None:
-        _cachedDefaultImage = ModelImporter.model('setting').get(
-            PluginSettings.DEFAULT_IMAGE, default='identicon')
+    defaultImage = Setting().get(
+        PluginSettings.DEFAULT_IMAGE, default='identicon')
 
     md5 = hashlib.md5(user['email'].encode('utf8')).hexdigest()
-    return 'https://www.gravatar.com/avatar/%s?d=%s' % (
-        md5, _cachedDefaultImage)
+    return 'https://www.gravatar.com/avatar/%s?d=%s' % (md5, defaultImage)
 
 
 @access.public
-@loadmodel(model='user', level=AccessType.READ)
-@describeRoute(
+@autoDescribeRoute(
     Description('Redirects to the gravatar image for a user.')
-    .param('id', 'The ID of the user.', paramType='path')
+    .modelParam('id', 'The ID of the user.', model=User, level=AccessType.READ)
     .param('size', 'Size in pixels for the image (default=64).', required=False,
-           dataType='int')
+           dataType='int', default=64)
 )
-def getGravatar(user, params):
-    size = int(params.get('size', 64))
-
+def getGravatar(user, size):
     if not user.get('gravatar_baseUrl'):
         # the save hook will cause the gravatar base URL to be computed
-        user = ModelImporter.model('user').save(user)
+        user = User().save(user)
 
     raise cherrypy.HTTPRedirect(user['gravatar_baseUrl'] + '&s=%d' % size)
 
@@ -73,9 +64,7 @@ def getGravatar(user, params):
 @setting_utilities.validator(PluginSettings.DEFAULT_IMAGE)
 def _validateDefaultImage(doc):
     # TODO should we update user collection to remove gravatar_baseUrl vals?
-    # Invalidate cached default image since setting changed
-    global _cachedDefaultImage
-    _cachedDefaultImage = None
+    pass
 
 
 def _userUpdate(event):
@@ -89,7 +78,6 @@ def _userUpdate(event):
 def load(info):
     info['apiRoot'].user.route('GET', (':id', 'gravatar'), getGravatar)
 
-    ModelImporter.model('user').exposeFields(
-        level=AccessType.READ, fields='gravatar_baseUrl')
+    User().exposeFields(level=AccessType.READ, fields='gravatar_baseUrl')
 
     events.bind('model.user.save', 'gravatar', _userUpdate)

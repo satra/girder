@@ -10,7 +10,7 @@ var JobStatus = {
             text = this._map[status].text;
         }
 
-        return text;
+        return '' + text;
     },
 
     icon: function (status) {
@@ -20,6 +20,20 @@ var JobStatus = {
         }
 
         return icon;
+    },
+
+    color: function (status) {
+        return this._map[status].color;
+    },
+
+    textColor: function (status) {
+        return this._map[status].textColor;
+    },
+
+    isCancelable: _.constant(false),
+
+    finished: function (status) {
+        return this._map[status].finished;
     },
 
     /**
@@ -39,11 +53,25 @@ var JobStatus = {
     registerStatus: function (status) {
         _.each(status, function (info, name) {
             this[name] = info.value;
-            this._map[info.value] = {
+
+            let statusInfo = {
                 text: info.text,
-                icon: info.icon
+                icon: info.icon,
+                color: info.color,
+                textColor: 'white',
+                finished: _.has(info, 'finished') ? info.finished : false
             };
+
+            if (_.has(info, 'textColor')) {
+                statusInfo.textColor = info.textColor;
+            }
+
+            this._map[info.value] = statusInfo;
         }, this);
+    },
+
+    getAll: function () {
+        return _.values(this._map);
     }
 };
 
@@ -51,32 +79,45 @@ JobStatus.registerStatus({
     INACTIVE: {
         value: 0,
         text: 'Inactive',
-        icon: 'icon-pause'
+        icon: 'icon-pause',
+        color: '#ccc',
+        textColor: '#555',
+        finished: false
     },
     QUEUED: {
         value: 1,
         text: 'Queued',
-        icon: 'icon-ellipsis'
+        icon: 'icon-ellipsis',
+        color: '#dbc345',
+        finished: false
     },
     RUNNING: {
         value: 2,
         text: 'Running',
-        icon: 'icon-spin3 animate-spin'
+        icon: 'icon-spin3 animate-spin',
+        color: '#6666d5',
+        finished: false
     },
     SUCCESS: {
         value: 3,
         text: 'Success',
-        icon: 'icon-ok'
+        icon: 'icon-ok',
+        color: '#53b653',
+        finished: true
     },
     ERROR: {
         value: 4,
         text: 'Error',
-        icon: 'icon-cancel'
+        icon: 'icon-cancel',
+        color: '#d44',
+        finished: true
     },
     CANCELED: {
         value: 5,
         text: 'Canceled',
-        icon: 'icon-cancel'
+        icon: 'icon-cancel',
+        color: '#545',
+        finished: true
     }
 });
 

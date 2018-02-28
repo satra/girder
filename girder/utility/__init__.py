@@ -17,6 +17,7 @@
 #  limitations under the License.
 ###############################################################################
 
+import cherrypy
 import datetime
 import dateutil.parser
 import errno
@@ -25,6 +26,7 @@ import os
 import pytz
 import re
 import string
+import six
 
 import girder
 import girder.events
@@ -33,7 +35,7 @@ try:
     from random import SystemRandom
     random = SystemRandom()
     random.random()  # potentially raises NotImplementedError
-except NotImplementedError:  # pragma: no cover
+except NotImplementedError:
     girder.logprint.warning(
         'WARNING: using non-cryptographically secure PRNG.')
     import random
@@ -102,6 +104,30 @@ def mkdir(path, mode=0o777, recurse=True, existOk=True):
             raise
 
 
+def toBool(val):
+    """
+    Coerce a string value to a bool. Meant to be used to parse HTTP
+    parameters, which are always sent as strings. The following string
+    values will be interpreted as True:
+
+      - ``'true'``
+      - ``'on'``
+      - ``'1'``
+      - ``'yes'``
+
+    All other strings will be interpreted as False. If the given param
+    is not passed at all, returns the value specified by the default arg.
+    This function is case-insensitive.
+
+    :param val: The value to coerce to a bool.
+    :type val: str
+    """
+    if isinstance(val, bool):
+        return val
+
+    return val.lower().strip() in ('true', 'on', '1', 'yes')
+
+
 class JsonEncoder(json.JSONEncoder):
     """
     This extends the standard json.JSONEncoder to allow for more types to be
@@ -118,3 +144,100 @@ class JsonEncoder(json.JSONEncoder):
         elif isinstance(obj, datetime.datetime):
             return obj.replace(tzinfo=pytz.UTC).isoformat()
         return str(obj)
+
+
+class RequestBodyStream(object):
+    """
+    Wraps a cherrypy request body into a more abstract file-like object.
+    """
+    _ITER_CHUNK_LEN = 65536
+
+    def __init__(self, stream, size=None):
+        self.stream = stream
+        self.size = size
+
+    def read(self, *args, **kwargs):
+        return self.stream.read(*args, **kwargs)
+
+    def close(self, *args, **kwargs):
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return self.getSize()
+
+    def next(self):
+        data = self.read(self._ITER_CHUNK_LEN)
+        if not data:
+            raise StopIteration
+        return data
+
+    def __next__(self):
+        return self.next()
+
+    def getSize(self):
+        """
+        Returns the size of the body data wrapped by this class. For
+        multipart encoding, this is the size of the part. For sending
+        as the body, this is the Content-Length header.
+        """
+        if self.size is not None:
+            return self.size
+
+        return int(cherrypy.request.headers['Content-Length'])
+
+
+def optionalArgumentDecorator(baseDecorator):
+    """
+    This decorator can be applied to other decorators, allowing the target decorator to be used
+    either with or without arguments.
+
+    The target decorator is expected to take at least 1 argument: the function to be wrapped. If
+    additional arguments are provided by the final implementer of the target decorator, they will
+    be passed to the target decorator as additional arguments.
+
+    For example, this may be used as:
+
+        @optionalArgumentDecorator
+        def myDec(fun, someArg=None):
+            ...
+
+        @myDec
+        def a(...):
+            ...
+
+        @myDec()
+        def a(...):
+            ...
+
+        @myDec(5)
+        def a(...):
+            ...
+
+        @myDec(someArg=5)
+        def a(...):
+            ...
+
+    :param baseDecorator: The target decorator.
+    :type baseDecorator: callable
+    """
+    @six.wraps(baseDecorator)
+    def normalizedArgumentDecorator(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]):  # Applied as a raw decorator
+            decoratedFunction = args[0]
+            # baseDecorator must wrap and return decoratedFunction
+            return baseDecorator(decoratedFunction)
+        else:   # Applied as a argument-containing decorator
+            # Decoration will occur in two passes:
+            #   * Now, the decorator arguments are passed, and a new decorator should be returned
+            #   * Afterwards, the new decorator will be called to decorate the decorated function
+            decoratorArgs = args
+            decoratorKwargs = kwargs
+
+            def partiallyAppliedDecorator(decoratedFunction):
+                return baseDecorator(decoratedFunction, *decoratorArgs, **decoratorKwargs)
+            return partiallyAppliedDecorator
+
+    return normalizedArgumentDecorator

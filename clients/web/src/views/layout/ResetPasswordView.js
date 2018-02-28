@@ -1,5 +1,3 @@
-import _ from 'underscore';
-
 import View from 'girder/views/View';
 import events from 'girder/events';
 import { handleClose, handleOpen } from 'girder/dialog';
@@ -18,23 +16,23 @@ var ResetPasswordView = View.extend({
         'submit #g-reset-password-form': function (e) {
             e.preventDefault();
             restRequest({
-                path: 'user/password/temporary',
+                url: 'user/password/temporary',
                 data: {
                     email: this.$('#g-email').val().trim()
                 },
-                type: 'PUT',
+                method: 'PUT',
                 error: null // don't do default error behavior
-            }).done(_.bind(function () {
+            }).done(() => {
                 this.$el.modal('hide');
                 events.trigger('g:alert', {
                     icon: 'mail-alt',
                     text: 'Password reset email sent.',
                     type: 'success'
                 });
-            }, this)).error(_.bind(function (err) {
+            }).fail((err) => {
                 this.$('.g-validation-failed-message').text(err.responseJSON.message);
                 this.$('#g-reset-password-button').girderEnable(true);
-            }, this));
+            });
 
             this.$('#g-reset-password-button').girderEnable(false);
             this.$('.g-validation-failed-message').text('');
@@ -49,12 +47,16 @@ var ResetPasswordView = View.extend({
         }
     },
 
+    initialize: function (settings) {
+        this.registrationPolicy = settings.registrationPolicy;
+    },
+
     render: function () {
-        var view = this;
-        this.$el.html(ResetPasswordDialogTemplate(
-        )).girderModal(this).on('shown.bs.modal', function () {
-            view.$('#g-email').focus();
-        }).on('hidden.bs.modal', function () {
+        this.$el.html(ResetPasswordDialogTemplate({
+            registrationPolicy: this.registrationPolicy
+        })).girderModal(this).on('shown.bs.modal', () => {
+            this.$('#g-email').focus();
+        }).on('hidden.bs.modal', () => {
             handleClose('resetpassword', {replace: true});
         });
         this.$('#g-email').focus();

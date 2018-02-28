@@ -23,22 +23,31 @@ from bson import json_util
 
 from girder import events
 from girder.constants import AccessType, SortDir
-from girder.models.model_base import AccessControlledModel, ValidationException
+from girder.exceptions import ValidationException
+from girder.models.model_base import AccessControlledModel
+from girder.models.notification import Notification
+from girder.models.token import Token
+from girder.models.user import User
 from girder.plugins.jobs.constants import JobStatus, JOB_HANDLER_LOCAL
 
 
 class Job(AccessControlledModel):
+
     def initialize(self):
         self.name = 'job'
         compoundSearchIndex = (
             ('userId', SortDir.ASCENDING),
-            ('created', SortDir.DESCENDING)
+            ('created', SortDir.DESCENDING),
+            ('type', SortDir.ASCENDING),
+            ('status', SortDir.ASCENDING)
         )
-        self.ensureIndices([(compoundSearchIndex, {})])
+        self.ensureIndices([(compoundSearchIndex, {}),
+                            'created', 'parentId', 'celeryTaskId'])
 
         self.exposeFields(level=AccessType.READ, fields={
             'title', 'type', 'created', 'interval', 'when', 'status',
-            'progress', 'log', 'meta', '_id', 'public', 'async', 'updated', 'timestamps'})
+            'progress', 'log', 'meta', '_id', 'public', 'parentId', 'async',
+            'updated', 'timestamps', 'handler', 'jobInfoSpec'})
 
         self.exposeFields(level=AccessType.SITE_ADMIN, fields={'args', 'kwargs'})
 
@@ -52,24 +61,67 @@ class Job(AccessControlledModel):
             raise ValidationException(
                 'Invalid job status %s.' % status, field='status')
 
-    def list(self, user=None, limit=0, offset=0, sort=None, currentUser=None):
+    def _validateChild(self, parentJob, childJob):
+        if str(parentJob['_id']) == str(childJob['_id']):
+            raise ValidationException('Child Id cannot be equal to Parent Id')
+        if childJob['parentId']:
+            raise ValidationException('Cannot overwrite the Parent Id')
+
+    def list(self, user=None, types=None, statuses=None,
+             limit=0, offset=0, sort=None, currentUser=None, parentJob=None):
         """
         List a page of jobs for a given user.
 
         :param user: The user who owns the job.
-        :type user: dict or None
+        :type user: dict, 'all', 'none', or None.
+        :param types: job type filter.
+        :type types: array of type string, or None.
+        :param statuses: job status filter.
+        :type statuses: array of status integer, or None.
         :param limit: The page limit.
-        :param offset: The page offset
+        :param limit: The page limit.
+        :param offset: The page offset.
         :param sort: The sort field.
+        :param parentJob: Parent Job.
         :param currentUser: User for access filtering.
         """
-        userId = user['_id'] if user else None
-        cursor = self.find({'userId': userId}, sort=sort)
+        query = {}
+        # When user is 'all', no filtering by user, list jobs of all users.
+        if user == 'all':
+            pass
+        # When user is 'none' or None, list anonymous user jobs.
+        elif user == 'none' or user is None:
+            query['userId'] = None
+        # Otherwise, filter by user id
+        else:
+            query['userId'] = user['_id']
+        if types is not None:
+            query['type'] = {'$in': types}
+        if statuses is not None:
+            query['status'] = {'$in': statuses}
+        if parentJob:
+            query['parentId'] = parentJob['_id']
+
+        cursor = self.find(query, sort=sort)
 
         for r in self.filterResultsByPermission(cursor=cursor, user=currentUser,
                                                 level=AccessType.READ,
                                                 limit=limit, offset=offset):
             yield r
+
+    def listAll(self, limit=0, offset=0, sort=None, currentUser=None):
+        """
+        List all jobs.
+
+        :param limit: The page limit.
+        :param offset: The page offset
+        :param sort: The sort field.
+        :param currentUser: User for access filtering.
+        .. deprecated :: 2.3.0
+           Use :func:`job.list` instead
+        """
+        return self.list(user='all', types=None, statuses=None, limit=limit,
+                         offset=offset, sort=sort, currentUser=currentUser)
 
     def cancelJob(self, job):
         """
@@ -114,7 +166,7 @@ class Job(AccessControlledModel):
 
     def createJob(self, title, type, args=(), kwargs=None, user=None, when=None,
                   interval=0, public=False, handler=None, async=False,
-                  save=True, otherFields=None):
+                  save=True, parentJob=None, otherFields=None):
         """
         Create a new job record.
 
@@ -146,6 +198,8 @@ class Job(AccessControlledModel):
         :type async: bool
         :param save: Whether the documented should be saved to the database.
         :type save: bool
+        :param parentJob: The job which will be set as a parent
+        :type parentJob: Job
         :param otherFields: Any additional fields to set on the job.
         :type otherFields: dict
         """
@@ -158,7 +212,9 @@ class Job(AccessControlledModel):
             kwargs = {}
 
         otherFields = otherFields or {}
-
+        parentId = None
+        if parentJob:
+            parentId = parentJob['_id']
         job = {
             'title': title,
             'type': type,
@@ -174,7 +230,8 @@ class Job(AccessControlledModel):
             'meta': {},
             'handler': handler,
             'async': async,
-            'timestamps': []
+            'timestamps': [],
+            'parentId': parentId
         }
 
         job.update(otherFields)
@@ -184,9 +241,20 @@ class Job(AccessControlledModel):
         if user:
             job['userId'] = user['_id']
             self.setUserAccess(job, user=user, level=AccessType.ADMIN)
+        else:
+            job['userId'] = None
 
         if save:
             job = self.save(job)
+        if user:
+            deserialized_kwargs = job['kwargs']
+            job['kwargs'] = json_util.dumps(job['kwargs'])
+
+            Notification().createNotification(
+                type='job_created', data=job, user=user,
+                expires=datetime.datetime.utcnow() + datetime.timedelta(seconds=30))
+
+            job['kwargs'] = deserialized_kwargs
 
         return job
 
@@ -223,7 +291,7 @@ class Job(AccessControlledModel):
         kwargs['fields'] = self._computeFields(kwargs)
         job = super(Job, self).load(*args, **kwargs)
 
-        if job and isinstance(job['kwargs'], six.string_types):
+        if job and isinstance(job.get('kwargs'), six.string_types):
             job['kwargs'] = json_util.loads(job['kwargs'])
         if job and isinstance(job.get('log'), six.string_types):
             # Legacy support: log used to be just a string, but we want to
@@ -248,8 +316,7 @@ class Job(AccessControlledModel):
         Create a token that can be used just for the management of an individual
         job, e.g. updating job info, progress, logs, status.
         """
-        return self.model('token').createToken(
-            days=days, scope='jobs.job_' + str(job['_id']))
+        return Token().createToken(days=days, scope='jobs.job_' + str(job['_id']))
 
     def updateJob(self, job, log=None, overwrite=False, status=None,
                   progressTotal=None, progressCurrent=None, notify=True,
@@ -291,19 +358,29 @@ class Job(AccessControlledModel):
         now = datetime.datetime.utcnow()
         user = None
         otherFields = otherFields or {}
-
         if job['userId']:
-            user = self.model('user').load(job['userId'], force=True)
+            user = User().load(job['userId'], force=True)
+
+        query = {
+            '_id': job['_id']
+        }
 
         updates = {
             '$push': {},
             '$set': {}
         }
 
+        statusChanged = False
         if log is not None:
             self._updateLog(job, log, overwrite, now, notify, user, updates)
         if status is not None:
-            self._updateStatus(job, status, now, notify, user, updates)
+            try:
+                status = int(status)
+            except ValueError:
+                # Allow non int states
+                pass
+            statusChanged = status != job['status']
+            self._updateStatus(job, status, now, query, updates)
         if progressMessage is not None or progressCurrent is not None or progressTotal is not None:
             self._updateProgress(
                 job, progressTotal, progressCurrent, progressMessage, notify, user, updates)
@@ -318,11 +395,22 @@ class Job(AccessControlledModel):
             job['updated'] = now
             updates['$set']['updated'] = now
 
-            self.update({'_id': job['_id']}, update=updates, multi=False)
+            updateResult = self.update(query, update=updates, multi=False)
+            # If our query didn't match anything then our state transition
+            # was not valid. So raise an exception
+            if updateResult.matched_count != 1:
+                job = self.load(job['_id'], force=True)
+                msg = 'Invalid state transition to \'%s\', Current state is \'%s\'.' % (
+                    status, job['status'])
+                raise ValidationException(msg, field='status')
 
             events.trigger('jobs.job.update.after', {
                 'job': job
             })
+
+        # We don't want todo this until we know the update was successful
+        if statusChanged and user is not None and notify:
+            self._createUpdateStatusNotification(now, user, job)
 
         return job
 
@@ -334,25 +422,39 @@ class Job(AccessControlledModel):
             updates['$push']['log'] = log
         if notify and user:
             expires = now + datetime.timedelta(seconds=30)
-            self.model('notification').createNotification(
+            Notification().createNotification(
                 type='job_log', data={
                     '_id': job['_id'],
                     'overwrite': overwrite,
                     'text': log
                 }, user=user, expires=expires)
 
-    def _updateStatus(self, job, status, now, notify, user, updates):
-        """Helper for updating job progress information."""
-        try:
-            status = int(status)
-        except ValueError:
-            # Allow non int states
-            pass
+    def _createUpdateStatusNotification(self, now, user, job):
+        expires = now + datetime.timedelta(seconds=30)
+        filtered = self.filter(job, user)
+        filtered.pop('kwargs', None)
+        filtered.pop('log', None)
+        Notification().createNotification(
+            type='job_status', data=filtered, user=user, expires=expires)
 
+    def _updateStatus(self, job, status, now, query, updates):
+        """Helper for updating job progress information."""
         self._validateStatus(status)
 
         if status != job['status']:
             job['status'] = status
+            previous_states = JobStatus.validTransitions(job, status)
+            if previous_states is None:
+                # Get the current state
+                job = self.load(job['_id'], force=True)
+                msg = 'No valid state transition to \'%s\'. Current state is \'%s\'.' % (
+                    status, job['status'])
+                raise ValidationException(msg, field='status')
+
+            query['status'] = {
+                '$in': previous_states
+            }
+
             updates['$set']['status'] = status
             ts = {
                 'status': status,
@@ -360,14 +462,6 @@ class Job(AccessControlledModel):
             }
             job['timestamps'].append(ts)
             updates['$push']['timestamps'] = ts
-
-            if notify and user:
-                expires = now + datetime.timedelta(seconds=30)
-                filtered = self.filter(job, user)
-                filtered.pop('kwargs', None)
-                filtered.pop('log', None)
-                self.model('notification').createNotification(
-                    type='job_status', data=filtered, user=user, expires=expires)
 
     def _updateProgress(self, job, total, current, message, notify, user, updates):
         """Helper for updating job progress information."""
@@ -411,10 +505,9 @@ class Job(AccessControlledModel):
                     job['progress']['notificationId'] = nid
                     updates['$set']['progress.notificationId'] = nid
                 else:
-                    notification = self.model('notification').load(
-                        job['progress']['notificationId'])
+                    notification = Notification().load(job['progress']['notificationId'])
 
-                self.model('notification').updateProgress(
+                Notification().updateProgress(
                     notification, state=state,
                     message=job['progress']['message'],
                     current=job['progress']['current'],
@@ -423,12 +516,12 @@ class Job(AccessControlledModel):
     def _createProgressNotification(self, job, total, current, state, message,
                                     user=None):
         if not user:
-            user = self.model('user').load(job['userId'], force=True)
+            user = User().load(job['userId'], force=True)
         # TODO support channel-based notifications for jobs. For
         # right now we'll just go through the user.
-        return self.model('notification').initProgress(
+        return Notification().initProgress(
             user, job['title'], total, state=state, current=current,
-            message=message, estimateTime=False)
+            message=message, estimateTime=False, resource=job, resourceName=self.name)
 
     def filter(self, doc, user=None, additionalKeys=None):
         """
@@ -451,3 +544,43 @@ class Job(AccessControlledModel):
         if fields is None and not kwargs.pop('includeLog', includeLogDefault):
             fields = {'log': False}
         return fields
+
+    def getAllTypesAndStatuses(self, user):
+        """
+        Get a list of types and statuses of all jobs or jobs owned by a particular user.
+        :param user: The user who owns the jobs.
+        :type user: dict, or 'all'.
+        """
+        query = {}
+        if user == 'all':
+            pass
+        else:
+            query['userId'] = user['_id']
+        types = self.collection.distinct('type', query)
+        statuses = self.collection.distinct('status', query)
+        return {'types': types, 'statuses': statuses}
+
+    def setParentJob(self, job, parentJob):
+        """
+        Sets a parent job for a job
+
+        :param job: Job document which the parent will be set on
+        :type job: Job
+        :param parentJob: Parent job
+        :type parentId: Job
+        """
+        self._validateChild(parentJob, job)
+        return self.updateJob(job, otherFields={'parentId': parentJob['_id']})
+
+    def listChildJobs(self, job):
+        """
+        Lists the child jobs for a given job
+
+        :param job: Job document
+        :type job: Job
+        """
+        query = {'parentId': job['_id']}
+        cursor = self.find(query)
+        user = User().load(job['userId'], force=True)
+        for r in self.filterResultsByPermission(cursor=cursor, user=user, level=AccessType.READ):
+            yield r

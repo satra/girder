@@ -165,7 +165,8 @@ corresponding document from the database, it would look like:
 
 .. code-block:: python
 
-    self.model('folder').load(theFolderId, user=self.getCurrentUser(), level=AccessType.READ)
+    from girder.models.folder import Folder
+    folder = Folder().load(theFolderId, user=self.getCurrentUser(), level=AccessType.READ)
 
 The `load <api-docs.html#girder.models.model_base.AccessControlledModel.load>`__
 method of each model class takes the resource's unique ID as its
@@ -180,24 +181,7 @@ requested by a specific user, and in those cases the ``force`` flag should be us
 
 .. code-block:: python
 
-    self.model('folder').load(theFolderId, force=True)
-
-If you need to load a model that is in a plugin rather than a core model, pass
-the plugin name as the second argument to the ``model`` method:
-
-.. code-block:: python
-
-    self.model('cat', 'cats').load(...)
-
-The `ModelImporter <api-docs.html#girder.utility.model_importer.ModelImporter>`__ class
-conveniently exposes a method for retrieving instances of models that are statically
-cached for efficient reuse. You can mix this class into any of your classes to
-enable ``self.model`` semantics. The ``ModelImporter.model`` method is
-static, so you can also just do the following anywhere:
-
-.. code-block:: python
-
-    ModelImporter.model('folder')...
+    Folder().load(theFolderId, force=True)
 
 Send a raw or streaming HTTP response body
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -338,8 +322,11 @@ behaviors, use the following examples:
     # Will log a message to the info log.
     logger.info('Test')
 
-Adding Automated Tests
-^^^^^^^^^^^^^^^^^^^^^^
+Adding Automated Tests with CTest
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note:: Girder is transitioning towards using `pytest <https://pytest.org>`_ for its testing.
+          The section below describes how to add automated tests using ``pytest``.
 
 The server side Python tests are run using
 `unittest <https://docs.python.org/2/library/unittest.html>`_. All of the actual
@@ -404,24 +391,61 @@ run.
 
        add_python_test(my_test RESOURCE_LOCKS cherrypy mongo)
 
+Adding Automated Tests with pytest
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Test cases for pytest are stored in ``test/``.
+
+**Provided Fixtures**
+
+All helper utilities for developing tests with ``pytest`` are stored in the
+``pytest_girder`` package within Girder. A list of fixtures provided can be viewed
+by running ``pytest --fixtures`` from the Girder directory.
+
+**Adding to an Existing Test Case**
+
+If you want to add tests to an existing test case, just create a new
+function in the file. The function name must start with **test**.
+
+**Creating a New Test Case**
+
+To create an entirely new test, create a new file in **test/** that starts
+with **test_**. To start off, put the following code in the module (with
+appropriate function name of course):
+
+.. code-block:: python
+
+    def testCase(server):
+        pass
+
+.. note:: If your test case does not need to communicate with the
+   server, you do not need include server as an argument to your
+   test. Refer to `pytest fixtures
+   <https://docs.pytest.org/en/latest/fixture.html>`_ for more
+   information on using dependency injection in this manner.
+
 .. _use_external_data:
 
-Downloading external data files for test cases
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Downloading External Data Artifacts for Test Cases
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-In some cases, it is necessary to perform a test on a file that is too big store
+In some cases, it is necessary to perform a test on an artifact that is too big to store
 inside a repository.  For tests such as these, Girder provides a way to link to
-test files served at `<https://midas3.kitware.com>`_ and have them automatically
-downloaded and cached during the build stage.  To add a new external file, first
-make an account at `<https://midas3.kitware.com>`_ and upload a publicly accessible
-file.  When viewing the items containing those files on Midas, there will be a
-link to "Download key file" appearing as a key icon.  This file contains
-the MD5 hash of the file contents and can be committed inside the
-``tests/data/`` directory of Girder's repository.  This file can then be
-listed as an optional ``EXTERNAL_DATA`` argument to the ``add_python_test``
-function to have the file downloaded as an extra build step.  As an example,
-consider the file currently used for testing called ``tests/data/test_file.txt.md5``.
-To use this file in you test, you would add the test as follows
+test artifacts served at `<https://data.kitware.com>`_ (or any Girder instance with the
+``hashsum_download`` plugin enabled) and have them automatically downloaded and cached during the
+build stage, while storing only the SHA512 hashsum of the test artifact in the source repository as
+a "key file".
+
+To add a new external artifact, first make an account at `<https://data.kitware.com>`_ and upload a
+publicly accessible file (ideally to the ``Girder`` collection, which you can request access to in
+your feature's GitHub pull request). Then, while viewing the newly created item page, open the file
+info dialog for the test artifact (by clicking the "i" icon to "Show info", next to the file link),
+then click the "SHA-512" field's key icon to "Download key file". Save and commit this downloaded
+key file to the ``tests/data/`` directory of Girder's repository. This file can then be listed as an
+optional ``EXTERNAL_DATA`` argument to the ``add_python_test`` function to have the artifact
+downloaded as an extra build step.  As an example, consider the artifact currently used for testing
+called ``tests/data/test_file.txt.md5``. To use this artifact in you test, you would add the test as
+follows:
 
 .. code-block:: cmake
 
@@ -429,18 +453,45 @@ To use this file in you test, you would add the test as follows
 
 The ``EXTERNAL_DATA`` keyword argument can take a list of files or even directories.
 When a directory is provided, it will download all files that exist in the given path.
-Inside your unit test, you can access these files under the path given
+Inside your test, you can access these artifact files under the path given
 by the environment variable ``GIRDER_TEST_DATA_PREFIX`` as follows
 
 .. code-block:: python
 
     import os
-    test_file = os.path.join(
+    test_artifact = os.path.join(
         os.environ['GIRDER_TEST_DATA_PREFIX'],
         'test_file.txt'
     )
-    with open(test_file, 'r') as f:
-        content = f.read() # The content of the downloaded test file
+    with open(test_artifact, 'r') as f:
+        content = f.read() # The content of the downloaded test artifact
+
+.. _python-coverage-paths:
+
+Setting python code coverage paths
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, python tests added via the ``add_python_test`` cmake function
+will only report coverage for python files within certain paths.  For
+core tests, the following paths are used:
+
+- ``girder``
+- ``clients/python/girder_client``
+
+For tests created within a plugin, the plugin's ``server`` directory is
+added to this list.  If you wish to report coverage on files residing outside
+of one of these directories, you can add a ``COVERAGE_PATHS`` argument
+to the ``add_python_test`` call.  This argument accepts one or more
+comma-separated paths.  For example, to add coverage reporting to
+to python files in a plugin's ``utils`` directory for a given test:
+
+.. code-block:: cmake
+
+    add_python_test(cat
+        PLUGIN cats
+        COVERAGE_PATHS "${PROJECT_SOURCE_DIRECTORY}/plugins/cats/utils"
+    )
+
 
 Mounting a custom application
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

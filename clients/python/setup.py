@@ -22,8 +22,10 @@ import re
 from setuptools import setup, find_packages
 
 install_reqs = [
+    'click>=6.7',
     'diskcache',
     'requests>=2.4.2',
+    'requests_toolbelt',
     'six'
 ]
 with open('README.rst') as f:
@@ -50,14 +52,16 @@ setup(
         'Environment :: Console',
         'License :: OSI Approved :: Apache Software License',
         'Operating System :: OS Independent',
-        'Programming Language :: Python :: 2'
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 3'
     ],
     packages=find_packages(exclude=('tests.*', 'tests')),
     install_requires=install_reqs,
     zip_safe=False,
     entry_points={
         'console_scripts': [
-            'girder-cli = girder_client.cli:main'
+            'girder-cli = girder_client.cli:main',
+            'girder-client = girder_client.cli:main'
         ]
     }
 )

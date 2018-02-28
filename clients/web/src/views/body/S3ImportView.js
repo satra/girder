@@ -1,3 +1,6 @@
+import $ from 'jquery';
+
+import BrowserWidget from 'girder/views/widgets/BrowserWidget';
 import router from 'girder/router';
 import View from 'girder/views/View';
 
@@ -23,10 +26,29 @@ var S3ImportView = View.extend({
                 destinationType: destType,
                 progress: true
             });
-        }
+        },
+        'click .g-open-browser': '_openBrowser'
     },
 
     initialize: function (settings) {
+        this._browserWidgetView = new BrowserWidget({
+            parentView: this,
+            titleText: 'Destination',
+            helpText: 'Browse to a location to select it as the destination.',
+            submitText: 'Select Destination',
+            validate: function (model) {
+                let isValid = $.Deferred();
+                if (!model) {
+                    isValid.reject('Please select a valid root.');
+                } else {
+                    isValid.resolve();
+                }
+                return isValid.promise();
+            }
+        });
+        this.listenTo(this._browserWidgetView, 'g:saved', function (val) {
+            this.$('#g-s3-import-dest-id').val(val.id);
+        });
         this.assetstore = settings.assetstore;
         this.render();
     },
@@ -35,6 +57,11 @@ var S3ImportView = View.extend({
         this.$el.html(S3ImportTemplate({
             assetstore: this.assetstore
         }));
+        return this;
+    },
+
+    _openBrowser: function () {
+        this._browserWidgetView.setElement($('#g-dialog-container')).render();
     }
 });
 

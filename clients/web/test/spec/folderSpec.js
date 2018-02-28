@@ -1,7 +1,3 @@
-/**
- * Start the girder backbone app.
- */
-/* globals waitsFor, runs, girderTest, expect, describe, it */
 girderTest.startApp();
 
 /* Show the folder edit dialog and click a button.
@@ -51,7 +47,7 @@ function _editFolder(button, buttonText, testValidation) {
         runs(function () {
             $('#g-name').val(oldval);
             girderTest.sendFile('clients/web/test/testFile.txt',
-                                '.g-markdown-drop-zone .g-file-input');
+                '.g-markdown-drop-zone .g-file-input');
         });
 
         waitsFor(function () {
@@ -62,7 +58,7 @@ function _editFolder(button, buttonText, testValidation) {
 
         runs(function () {
             girderTest.sendFile('clients/web/test/fake.jpg',
-                                '.g-markdown-drop-zone .g-file-input');
+                '.g-markdown-drop-zone .g-file-input');
         });
 
         waitsFor(function () {
@@ -109,10 +105,10 @@ function _editFolder(button, buttonText, testValidation) {
 describe('Test folder creation, editing, and deletion', function () {
     it('register a user',
         girderTest.createUser('admin',
-                              'admin@email.com',
-                              'Admin',
-                              'Admin',
-                              'adminpassword!'));
+            'admin@email.com',
+            'Admin',
+            'Admin',
+            'adminpassword!'));
 
     it('go to users page', girderTest.goToUsersPage());
 
@@ -177,7 +173,6 @@ describe('Test folder creation, editing, and deletion', function () {
     });
 
     it('create a subfolder in the public folder of the user', function () {
-
         waitsFor(function () {
             return $('a.g-folder-list-link:contains(Public):visible').length === 1;
         }, 'the public folder to be clickable');

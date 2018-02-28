@@ -93,10 +93,10 @@
         this.log(resultText, 'red');
 
         var items = spec.results().getItems();
-        _.each(items, function (item) {
+        _.each(items, _.bind(function (item) {
             if (!item.passed()) {
-                this.log('__SCREENSHOT__phantom-' +
-                    new Date().toISOString().replace(/:/g, '.') + '.png');
+                var screenshotTime = new Date().toISOString().replace(/:/g, '.');
+                this.log('__SCREENSHOT__' + screenshotTime);
                 this.log('\n Error: ' + item.message, 'red');
                 this._printStackTrace(item.trace.stackArray);
                 window.callPhantom({
@@ -104,7 +104,7 @@
                     code: 1
                 });
             }
-        }, this);
+        }, this));
     };
 
     proto.reportSuiteResults = function (suite) {

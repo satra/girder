@@ -20,7 +20,6 @@ import ItemPageTemplate from 'girder/templates/body/itemPage.pug';
 import 'girder/stylesheets/body/itemPage.styl';
 
 import 'bootstrap/js/dropdown';
-import 'bootstrap/js/tooltip';
 
 /**
  * This view shows a single item's page.
@@ -87,24 +86,23 @@ var ItemView = View.extend({
         var folderId = this.model.get('folderId');
         var parentRoute = this.model.get('baseParentType') + '/' +
             this.model.get('baseParentId') + '/folder/' + folderId;
-        var page = this;
         confirm({
             text: 'Are you sure you want to delete <b>' + this.model.escape('name') + '</b>?',
             yesText: 'Delete',
             escapedHtml: true,
-            confirmCallback: _.bind(function () {
-                this.model.on('g:deleted', function () {
+            confirmCallback: () => {
+                this.model.on('g:deleted', () => {
                     router.navigate(parentRoute, {trigger: true});
-                }).off('g:error').on('g:error', function () {
-                    page.render();
+                }).off('g:error').on('g:error', () => {
+                    this.render();
                     events.trigger('g:alert', {
                         icon: 'cancel',
                         text: 'Failed to delete item.',
                         type: 'danger',
                         timeout: 4000
                     });
-                }).destroy();
-            }, this)
+                }, this).destroy();
+            }
         });
     },
 
@@ -112,7 +110,7 @@ var ItemView = View.extend({
         // Fetch the access level asynchronously and render once we have
         // it. TODO: load the page and adjust only the action menu once
         // the access level is fetched.
-        this.model.getAccessLevel(_.bind(function (accessLevel) {
+        this.model.getAccessLevel((accessLevel) => {
             this.accessLevel = accessLevel;
             this.$el.html(ItemPageTemplate({
                 item: this.model,
@@ -123,13 +121,6 @@ var ItemView = View.extend({
                 renderMarkdown: renderMarkdown,
                 DATE_SECOND: DATE_SECOND
             }));
-
-            this.$('.g-item-actions-button,.g-upload-into-item').tooltip({
-                container: 'body',
-                placement: 'left',
-                animation: false,
-                delay: {show: 100}
-            });
 
             this.fileListWidget = new FileListWidget({
                 el: this.$('.g-item-files-container'),
@@ -152,19 +143,19 @@ var ItemView = View.extend({
                 parentView: this
             });
 
-            this.model.getRootPath(_.bind(function (resp) {
+            this.model.getRootPath((resp) => {
                 this.breadcrumbWidget = new ItemBreadcrumbWidget({
                     el: this.$('.g-item-breadcrumb-container'),
                     parentChain: resp,
                     parentView: this
                 });
-            }, this));
+            });
 
             if (this.edit) {
                 this.editItem();
                 this.edit = false;
             }
-        }, this));
+        });
 
         return this;
     }

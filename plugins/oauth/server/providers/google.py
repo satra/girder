@@ -19,30 +19,29 @@
 
 from six.moves import urllib
 
-from girder.api.rest import getApiUrl, RestException
+from girder.api.rest import getApiUrl
+from girder.exceptions import RestException
+from girder.models.setting import Setting
 from .base import ProviderBase
 from .. import constants
 
 
 class Google(ProviderBase):
     _AUTH_URL = 'https://accounts.google.com/o/oauth2/auth'
-    _AUTH_SCOPES = ('profile', 'email')
+    _AUTH_SCOPES = ['profile', 'email']
     _TOKEN_URL = 'https://accounts.google.com/o/oauth2/token'
     _API_USER_URL = 'https://www.googleapis.com/plus/v1/people/me'
     _API_USER_FIELDS = ('id', 'emails', 'name')
 
     def getClientIdSetting(self):
-        return self.model('setting').get(
-            constants.PluginSettings.GOOGLE_CLIENT_ID)
+        return Setting().get(constants.PluginSettings.GOOGLE_CLIENT_ID)
 
     def getClientSecretSetting(self):
-        return self.model('setting').get(
-            constants.PluginSettings.GOOGLE_CLIENT_SECRET)
+        return Setting().get(constants.PluginSettings.GOOGLE_CLIENT_SECRET)
 
     @classmethod
     def getUrl(cls, state):
-        clientId = cls.model('setting').get(
-            constants.PluginSettings.GOOGLE_CLIENT_ID)
+        clientId = Setting().get(constants.PluginSettings.GOOGLE_CLIENT_ID)
 
         if clientId is None:
             raise Exception('No Google client ID setting is present.')

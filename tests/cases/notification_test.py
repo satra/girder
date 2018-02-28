@@ -21,8 +21,10 @@ import time
 
 from .. import base
 
-from girder.models.model_base import ValidationException
+from girder.exceptions import ValidationException
 from girder.models.notification import ProgressState
+from girder.models.token import Token
+from girder.models.user import User
 from girder.utility.progress import ProgressContext
 
 
@@ -38,7 +40,7 @@ class NotificationTestCase(base.TestCase):
     def setUp(self):
         base.TestCase.setUp(self)
 
-        self.admin = self.model('user').createUser(
+        self.admin = User().createUser(
             email='admin@email.com', login='admin', firstName='first',
             lastName='last', password='mypasswd')
 
@@ -100,6 +102,18 @@ class NotificationTestCase(base.TestCase):
             progress.interval = 1000
             progress.update(current=3)
 
+            # The message should contain a timestamp
+            self.assertIn('_girderTime', messages[0])
+            self.assertIsInstance(messages[0]['_girderTime'], int)
+
+            # Test that the "since" parameter correctly filters out messages
+            since = messages[0]['_girderTime'] + 1
+            resp = self.request(path='/notification/stream', method='GET',
+                                user=user, token=token, isJson=False,
+                                params={'timeout': 0, 'since': since})
+            messages = self.getSseMessages(resp)
+            self.assertEqual(len(messages), 0)
+
         # Exiting the context manager should flush the most recent update.
         resp = self.request(path='/notification/stream', method='GET',
                             user=user, token=token, isJson=False,
@@ -110,9 +124,7 @@ class NotificationTestCase(base.TestCase):
 
         # Test a ValidationException within the progress context
         try:
-            with ProgressContext(
-                    True, user=user, token=token, title='Test',
-                    total=100) as progress:
+            with ProgressContext(True, user=user, token=token, title='Test', total=100):
                 raise ValidationException('Test Message')
         except ValidationException:
             pass
@@ -132,5 +144,5 @@ class NotificationTestCase(base.TestCase):
         resp = self.request(path='/token/session', method='GET')
         self.assertStatusOk(resp)
         token = resp.json['token']
-        tokenDoc = self.model('token').load(token, force=True, objectId=False)
+        tokenDoc = Token().load(token, force=True, objectId=False)
         self._testStream(None, tokenDoc)

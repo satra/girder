@@ -1,5 +1,3 @@
-import _ from 'underscore';
-
 import PluginConfigBreadcrumbWidget from 'girder/views/widgets/PluginConfigBreadcrumbWidget';
 import View from 'girder/views/View';
 import events from 'girder/events';
@@ -15,24 +13,24 @@ var ConfigView = View.extend({
 
             this._saveSettings([{
                 key: 'gravatar.default_image',
-                value: this.$('#gravatar.default_image').val().trim()
+                value: this.$('#g-gravatar-default-image').val().trim()
             }]);
         }
     },
 
     initialize: function () {
         restRequest({
-            type: 'GET',
-            path: 'system/setting',
+            method: 'GET',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(['gravatar.default_image'])
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.render();
-            this.$('#gravatar.default_image').val(
+            this.$('#g-gravatar-default-image').val(
                 resp['gravatar.default_image']
             );
-        }, this));
+        });
     },
 
     render: function () {
@@ -51,24 +49,24 @@ var ConfigView = View.extend({
 
     _saveSettings: function (settings) {
         restRequest({
-            type: 'PUT',
-            path: 'system/setting',
+            method: 'PUT',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(settings)
             },
             error: null
-        }).done(_.bind(function () {
+        }).done(() => {
             events.trigger('g:alert', {
                 icon: 'ok',
                 text: 'Settings saved.',
                 type: 'success',
                 timeout: 4000
             });
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             this.$('#g-gravatar-error-message').text(
                 resp.responseJSON.message
             );
-        }, this));
+        });
     }
 });
 

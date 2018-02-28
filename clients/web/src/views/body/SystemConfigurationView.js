@@ -1,17 +1,21 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
-import SearchFieldWidget from 'girder/views/widgets/SearchFieldWidget';
+import AccessWidget from 'girder/views/widgets/AccessWidget';
 import View from 'girder/views/View';
 import events from 'girder/events';
 import { restRequest, cancelRestRequests } from 'girder/rest';
 import { restartServerPrompt } from 'girder/server';
+import CollectionCreationPolicyModel from 'girder/models/CollectionCreationPolicyModel';
 
 import SystemConfigurationTemplate from 'girder/templates/body/systemConfiguration.pug';
 
 import 'girder/stylesheets/body/systemConfig.styl';
 
 import 'bootstrap/js/collapse';
-import 'bootstrap/js/tooltip';
+import 'bootstrap/js/transition';
+import 'bootstrap-switch'; // /dist/js/bootstrap-switch.js',
+import 'bootstrap-switch/dist/css/bootstrap3/bootstrap-switch.css';
 
 /**
  * The system config page for administrators.
@@ -20,60 +24,74 @@ var SystemConfigurationView = View.extend({
     events: {
         'submit .g-settings-form': function (event) {
             event.preventDefault();
-            this.$('.g-submit-settings').addClass('disabled');
+            this.$('.g-submit-settings').girderEnable(false);
             this.$('#g-settings-error-message').empty();
 
-            var settings = _.map(this.settingsKeys, function (key) {
+            this.$('#g-core-collection-create-policy').val(JSON.stringify(this._covertCollectionCreationPolicy()));
+            var settings = _.map(this.settingsKeys, (key) => {
+                const element = this.$('#g-' + key.replace(/[_.]/g, '-'));
+
                 if (key === 'core.route_table') {
                     return {
-                        key: key,
+                        key,
                         value: _.object(_.map($('.g-core-route-table'), function (el) {
-                            return [$(el).data('webroot-name'), $(el).val()];
+                            return [$(el).data('webrootName'), $(el).val()];
                         }))
                     };
+                } else if (_.contains(['core.api_keys', 'core.enable_password_login'], key)) { // booleans via checkboxes
+                    return {
+                        key,
+                        value: element.is(':checked')
+                    };
+                } else { // all other settings use $.fn.val()
+                    return {
+                        key,
+                        value: element.val() || null
+                    };
                 }
-
-                return {
-                    key: key,
-                    value: this.$('#g-' + key.replace(/[_.]/g, '-')).val() || null
-                };
-            }, this);
+            });
 
             restRequest({
-                type: 'PUT',
-                path: 'system/setting',
+                method: 'PUT',
+                url: 'system/setting',
                 data: {
                     list: JSON.stringify(settings)
                 },
                 error: null
-            }).done(_.bind(function () {
-                this.$('.g-submit-settings').removeClass('disabled');
+            }).done(() => {
+                this.$('.g-submit-settings').girderEnable(true);
                 events.trigger('g:alert', {
                     icon: 'ok',
                     text: 'Settings saved.',
                     type: 'success',
                     timeout: 4000
                 });
-            }, this)).error(_.bind(function (resp) {
-                this.$('.g-submit-settings').removeClass('disabled');
+            }).fail((resp) => {
+                this.$('.g-submit-settings').girderEnable(true);
                 this.$('#g-settings-error-message').text(resp.responseJSON.message);
-            }, this));
+            });
         },
-        'click .g-edit-collection-create-policy': function () {
-            this.collectionCreateAccessWidget.render();
-        },
-        'click #g-restart-server': restartServerPrompt
+        'click #g-restart-server': restartServerPrompt,
+        'click #g-core-banner-default-color': function () {
+            this.$('#g-core-banner-color').val(this.defaults['core.banner_color']);
+        }
     },
 
     initialize: function () {
         cancelRestRequests('fetch');
 
         var keys = [
+            'core.api_keys',
+            'core.contact_email_address',
+            'core.brand_name',
+            'core.banner_color',
             'core.cookie_lifetime',
+            'core.enable_password_login',
             'core.email_from_address',
             'core.email_host',
             'core.registration_policy',
             'core.email_verification',
+            'core.server_root',
             'core.smtp_host',
             'core.smtp.port',
             'core.smtp.encryption',
@@ -90,26 +108,26 @@ var SystemConfigurationView = View.extend({
         ];
         this.settingsKeys = keys;
         restRequest({
-            path: 'system/setting',
-            type: 'GET',
+            url: 'system/setting',
+            method: 'GET',
             data: {
                 list: JSON.stringify(keys),
                 default: 'none'
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.settings = resp;
             restRequest({
-                path: 'system/setting',
-                type: 'GET',
+                url: 'system/setting',
+                method: 'GET',
                 data: {
                     list: JSON.stringify(keys),
                     default: 'default'
                 }
-            }).done(_.bind(function (resp) {
+            }).done((resp) => {
                 this.defaults = resp;
                 this.render();
-            }, this));
-        }, this));
+            });
+        });
     },
 
     render: function () {
@@ -117,73 +135,67 @@ var SystemConfigurationView = View.extend({
             settings: this.settings,
             defaults: this.defaults,
             routes: this.settings['core.route_table'] || this.defaults['core.route_table'],
-            routeKeys: _.sortBy(_.keys(this.settings['core.route_table'] ||
-                                       this.defaults['core.route_table']),
-                                function (a) {
-                                    return a.indexOf('core_') === 0 ? -1 : 0;
-                                }),
+            routeKeys: _.sortBy(
+                _.keys(this.settings['core.route_table'] || this.defaults['core.route_table']),
+                (a) => a.indexOf('core_') === 0 ? -1 : 0
+            ),
             JSON: window.JSON
         }));
 
-        this.$('input[title]').tooltip({
-            container: this.$el,
-            animation: false,
-            delay: {show: 200}
-        });
+        var enableCollectionCreationPolicy = this.settings['core.collection_create_policy'] ? this.settings['core.collection_create_policy'].open : false;
 
-        this.searchWidget = new SearchFieldWidget({
-            el: this.$('.g-collection-create-policy-container .g-search-container'),
-            parentView: this,
-            types: ['user', 'group'],
-            placeholder: 'Add a user or group...',
-            settingValue: this.settings['core.collection_create_policy'] ||
-                               this.defaults['core.collection_create_policy']
-        }).on('g:resultClicked', function (result) {
-            var settingValue = null;
-
-            try {
-                settingValue = JSON.parse(this.$('#g-core-collection-create-policy').val());
-                this.$('#g-settings-error-message').empty();
-            } catch (err) {
-                this.$('#g-settings-error-message').text('Collection creation policy must be a JSON object.');
-                this.searchWidget.resetState();
-                return this;
-            }
-            this.searchWidget.resetState();
-
-            if (result.type === 'user') {
-                settingValue.users = settingValue.users || [];
-                if (!_.contains(settingValue.users, result.id)) {
-                    settingValue.users.push(result.id);
+        this.$('.g-plugin-switch')
+            .bootstrapSwitch()
+            .bootstrapSwitch('state', enableCollectionCreationPolicy)
+            .off('switchChange.bootstrapSwitch')
+            .on('switchChange.bootstrapSwitch', (event, state) => {
+                if (state) {
+                    this._renderCollectionCreationPolicyAccessWidget();
                 } else {
-                    events.trigger('g:alert', {
-                        icon: 'ok',
-                        text: 'User already exists in current policy.',
-                        type: 'warning',
-                        timeout: 4000
-                    });
+                    this.accessWidget.destroy();
+                    this.accessWidget = null;
                 }
-            } else if (result.type === 'group') {
-                settingValue.groups = settingValue.groups || [];
-                if (!_.contains(settingValue.groups, result.id)) {
-                    settingValue.groups.push(result.id);
-                } else {
-                    events.trigger('g:alert', {
-                        icon: 'ok',
-                        text: 'Group already exists in current policy.',
-                        type: 'warning',
-                        timeout: 4000
-                    });
-                }
-            }
+            });
 
-            this.$('#g-core-collection-create-policy').val(
-                JSON.stringify(settingValue, null, 4));
-        }, this).render();
+        if (enableCollectionCreationPolicy) {
+            this._renderCollectionCreationPolicyAccessWidget();
+        }
 
         return this;
+    },
+
+    _renderCollectionCreationPolicyAccessWidget: function () {
+        var collectionCreationPolicyModel = new CollectionCreationPolicyModel();
+
+        this.accessWidget = new AccessWidget({
+            el: this.$('.g-collection-create-policy-container .access-widget-container'),
+            modelType: 'collection_creation_policy',
+            model: collectionCreationPolicyModel,
+            parentView: this,
+            modal: false,
+            hideRecurseOption: true,
+            hideSaveButton: true,
+            hidePrivacyEditor: true,
+            hideAccessType: true,
+            noAccessFlag: true
+        });
+    },
+
+    _covertCollectionCreationPolicy: function () {
+        // get collection creation policy from AccessWidget and format the result properly
+        var settingValue = null;
+        if (this.$('.g-plugin-switch').bootstrapSwitch('state')) {
+            settingValue = { open: this.$('.g-plugin-switch').bootstrapSwitch('state') };
+            var accessList = this.accessWidget.getAccessList();
+            _.each(_.keys(accessList), (key) => {
+                settingValue[key] = _.pluck(accessList[key], 'id');
+            });
+        } else {
+            settingValue = this.settings['core.collection_create_policy'] || this.defaults['core.collection_create_policy'];
+            settingValue['open'] = false;
+        }
+        return settingValue;
     }
 });
 
 export default SystemConfigurationView;
-

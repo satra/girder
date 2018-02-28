@@ -1,5 +1,3 @@
-import _ from 'underscore';
-
 import AssetstoreCollection from 'girder/collections/AssetstoreCollection';
 import { getCurrentUser } from 'girder/auth';
 import { restRequest } from 'girder/rest';
@@ -12,17 +10,17 @@ function extendModel(Model, modelType) {
      */
     Model.prototype.updateQuotaPolicy = function () {
         restRequest({
-            path: this.resourceName + '/' + this.get('_id') + '/quota',
-            type: 'PUT',
+            url: `${this.resourceName}/${this.id}/quota`,
+            method: 'PUT',
             error: null,
             data: {
                 policy: JSON.stringify(this.get('quotaPolicy'))
             }
-        }).done(_.bind(function () {
+        }).done(() => {
             this.trigger('g:quotaPolicySaved');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
 
         return this;
     };
@@ -39,14 +37,14 @@ function extendModel(Model, modelType) {
         });
         if (!this.get('quotaPolicy') || force) {
             restRequest({
-                path: this.resourceName + '/' + this.get('_id') + '/quota',
-                type: 'GET'
-            }).done(_.bind(function (resp) {
+                url: `${this.resourceName}/${this.id}/quota`,
+                method: 'GET'
+            }).done((resp) => {
                 this.set('quotaPolicy', resp.quota);
                 this.fetch();
-            }, this)).error(_.bind(function (err) {
+            }).fail((err) => {
                 this.trigger('g:error', err);
-            }, this));
+            });
         } else {
             this.fetch();
         }
@@ -65,7 +63,7 @@ function extendModel(Model, modelType) {
         if (getCurrentUser().get('admin') &&
                 (!this.get('assetstoreList') || force)) {
             this.set('assetstoreList',
-                     new AssetstoreCollection());
+                new AssetstoreCollection());
             this.get('assetstoreList').on('g:changed', function () {
                 this.fetchDefaultQuota(force);
             }, this).fetch();
@@ -85,15 +83,15 @@ function extendModel(Model, modelType) {
         if (getCurrentUser().get('admin') &&
                 (!this.get('defaultQuota') || force)) {
             restRequest({
-                path: 'system/setting',
-                type: 'GET',
+                url: 'system/setting',
+                method: 'GET',
                 data: {
                     key: 'user_quota.default_' + modelType + '_quota'
                 }
-            }).done(_.bind(function (resp) {
+            }).done((resp) => {
                 this.set('defaultQuota', resp);
                 this.trigger('g:quotaPolicyFetched');
-            }, this));
+            });
         } else {
             this.trigger('g:quotaPolicyFetched');
         }

@@ -17,16 +17,22 @@
 #  limitations under the License.
 ###############################################################################
 
-import json
 import six
 
 from bson.objectid import ObjectId, InvalidId
 from girder import logger
 from girder.api import access
-from girder.api.describe import Description, describeRoute
-from girder.api.rest import Resource, RestException, loadmodel
+from girder.api.describe import Description, autoDescribeRoute
+from girder.api.rest import Resource
 from girder.constants import AccessType
-from girder.models.model_base import GirderException, ValidationException
+from girder.exceptions import GirderException, ValidationException, RestException
+from girder.models.assetstore import Assetstore
+from girder.models.collection import Collection
+from girder.models.file import File
+from girder.models.item import Item
+from girder.models.setting import Setting
+from girder.models.upload import Upload
+from girder.models.user import User
 from girder.utility import assetstore_utilities
 from girder.utility.system import formatSize
 from . import constants
@@ -76,7 +82,7 @@ class QuotaPolicy(Resource):
         filtered[QUOTA_FIELD] = resource.get(QUOTA_FIELD, {})
         return filtered
 
-    def _setResourceQuota(self, model, resource, params):
+    def _setResourceQuota(self, model, resource, policy):
         """
         Handle setting quota policies for any resource that supports them.
 
@@ -85,8 +91,7 @@ class QuotaPolicy(Resource):
         :param params: the query parameters.  'policy' is required and used.
         :returns: the updated resource document.
         """
-        self.requireParams(('policy', ), params)
-        policy = self._validatePolicy(params['policy'])
+        policy = self._validatePolicy(policy)
         if QUOTA_FIELD not in resource:
             resource[QUOTA_FIELD] = {}
         resource[QUOTA_FIELD].update(policy)
@@ -169,13 +174,6 @@ class QuotaPolicy(Resource):
                            dictionary as if the JSON was already decoded.
         :returns: a validate policy dictionary.
         """
-        if not isinstance(policy, dict):
-            try:
-                policy = json.loads(policy)
-            except ValueError:
-                raise RestException('The policy parameter must be JSON.')
-        if not isinstance(policy, dict):
-            raise RestException('The policy parameter must be a dictionary.')
         validKeys = []
         for key in dir(self):
             if key.startswith('_validate_'):
@@ -186,70 +184,64 @@ class QuotaPolicy(Resource):
         for key in policy:
             if key not in validKeys:
                 raise RestException(
-                    '%s is not a valid quota policy key.  Valid keys are '
-                    '%s.' % (key, ', '.join(sorted(validKeys))))
+                    '%s is not a valid quota policy key.  Valid keys are %s.' %
+                    (key, ', '.join(sorted(validKeys))))
             funcName = '_validate_' + key
             policy[key] = getattr(self, funcName)(policy[key])
         return policy
 
     @access.public
-    @loadmodel(model='collection', level=AccessType.READ)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Get quota and assetstore policies for the collection.')
-        .param('id', 'The collection ID', paramType='path')
+        .modelParam('id', 'The collection ID', model=Collection, level=AccessType.READ)
         .errorResponse('ID was invalid.')
         .errorResponse('Read permission denied on the collection.', 403)
     )
-    def getCollectionQuota(self, collection, params):
+    def getCollectionQuota(self, collection):
         if QUOTA_FIELD not in collection:
             collection[QUOTA_FIELD] = {}
         collection[QUOTA_FIELD][
-            '_currentFileSizeQuota'] = self._getFileSizeQuota(
-            'collection', collection)
+            '_currentFileSizeQuota'] = self._getFileSizeQuota('collection', collection)
         return self._filter('collection', collection)
 
     @access.public
-    @loadmodel(model='collection', level=AccessType.ADMIN)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Set quota and assetstore policies for the collection.')
-        .param('id', 'The collection ID', paramType='path')
-        .param('policy', 'A JSON object containing the policies.  This is a '
-               'dictionary of keys and values.  Any key that is not specified '
-               'does not change.', required=True)
+        .modelParam('id', 'The collection ID', model=Collection, level=AccessType.ADMIN)
+        .jsonParam('policy', 'A JSON object containing the policies. This is a '
+                   'dictionary of keys and values. Any key that is not specified '
+                   'does not change.', requireObject=True)
         .errorResponse('ID was invalid.')
         .errorResponse('Read permission denied on the collection.', 403)
     )
-    def setCollectionQuota(self, collection, params):
-        return self._setResourceQuota('collection', collection, params)
+    def setCollectionQuota(self, collection, policy):
+        return self._setResourceQuota('collection', collection, policy)
 
     @access.public
-    @loadmodel(model='user', level=AccessType.READ)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Get quota and assetstore policies for the user.')
-        .param('id', 'The user ID', paramType='path')
+        .modelParam('id', 'The user ID', model=User, level=AccessType.READ)
         .errorResponse('ID was invalid.')
         .errorResponse('Read permission denied on the user.', 403)
     )
-    def getUserQuota(self, user, params):
+    def getUserQuota(self, user):
         if QUOTA_FIELD not in user:
             user[QUOTA_FIELD] = {}
-        user[QUOTA_FIELD]['_currentFileSizeQuota'] = self._getFileSizeQuota(
-            'user', user)
+        user[QUOTA_FIELD]['_currentFileSizeQuota'] = self._getFileSizeQuota('user', user)
         return self._filter('user', user)
 
     @access.public
-    @loadmodel(model='user', level=AccessType.ADMIN)
-    @describeRoute(
+    @autoDescribeRoute(
         Description('Set quota and assetstore policies for the user.')
-        .param('id', 'The user ID', paramType='path')
-        .param('policy', 'A JSON object containing the policies.  This is a '
-               'dictionary of keys and values.  Any key that is not specified '
-               'does not change.', required=True)
+        .modelParam('id', 'The user ID', model=User, level=AccessType.ADMIN)
+        .jsonParam('policy', 'A JSON object containing the policies.  This is a '
+                   'dictionary of keys and values.  Any key that is not specified '
+                   'does not change.', requireObject=True)
         .errorResponse('ID was invalid.')
         .errorResponse('Read permission denied on the user.', 403)
     )
-    def setUserQuota(self, user, params):
-        return self._setResourceQuota('user', user, params)
+    def setUserQuota(self, user, policy):
+        return self._setResourceQuota('user', user, policy)
 
     def _checkAssetstore(self, assetstoreSpec):
         """
@@ -267,7 +259,7 @@ class QuotaPolicy(Resource):
             return None
         if assetstoreSpec == 'none':
             return False
-        assetstore = self.model('assetstore').load(id=assetstoreSpec)
+        assetstore = Assetstore().load(id=assetstoreSpec)
         if not assetstore:
             return False
         adapter = assetstore_utilities.getAssetstoreAdapter(assetstore)
@@ -291,13 +283,11 @@ class QuotaPolicy(Resource):
             resource = self.model(model).load(id=resource, force=True)
         if model == 'file':
             model = 'item'
-            resource = self.model('item').load(id=resource['itemId'],
-                                               force=True)
+            resource = Item().load(id=resource['itemId'], force=True)
         if model in ('folder', 'item'):
             if ('baseParentType' not in resource or
                     'baseParentId' not in resource):
-                resource = self.model(model).load(id=resource['_id'],
-                                                  force=True)
+                resource = self.model(model).load(id=resource['_id'], force=True)
             if ('baseParentType' not in resource or
                     'baseParentId' not in resource):
                 return None, None
@@ -306,7 +296,7 @@ class QuotaPolicy(Resource):
             resource = self.model(model).load(id=resourceId, force=True)
         if model in ('user', 'collection') and resource:
             # Ensure the base resource has a quota field so we can use the
-            # default quota if apropriate
+            # default quota if appropriate
             if QUOTA_FIELD not in resource:
                 resource[QUOTA_FIELD] = {}
         if not resource or QUOTA_FIELD not in resource:
@@ -361,7 +351,7 @@ class QuotaPolicy(Resource):
             else:
                 key = None
             if key:
-                quota = self.model('setting').get(key, None)
+                quota = Setting().get(key, None)
         if not quota or quota < 0 or not isinstance(quota, six.integer_types):
             return None
         return quota
@@ -376,12 +366,11 @@ class QuotaPolicy(Resource):
         """
         origSize = 0
         if 'fileId' in upload:
-            file = self.model('file').load(id=upload['fileId'], force=True)
+            file = File().load(id=upload['fileId'], force=True)
             origSize = int(file.get('size', 0))
             model, resource = self._getBaseResource('file', file)
         else:
-            model, resource = self._getBaseResource(upload['parentType'],
-                                                    upload['parentId'])
+            model, resource = self._getBaseResource(upload['parentType'], upload['parentId'])
         if resource is None:
             return None
         fileSizeQuota = self._getFileSizeQuota(model, resource)
@@ -431,7 +420,7 @@ class QuotaPolicy(Resource):
         quotaInfo = self._checkUploadSize(upload)
         if quotaInfo:
             # Delete the upload
-            self.model('upload').cancelUpload(upload)
+            Upload().cancelUpload(upload)
             raise ValidationException(
                 'Upload exceeded file storage quota (need %s, only %s '
                 'available - used %s out of %s)' %

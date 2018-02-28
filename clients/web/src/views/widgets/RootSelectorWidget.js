@@ -71,9 +71,11 @@ var RootSelectorWidget = View.extend({
         _.extend(this.groups, settings.groups);
 
         // attach collection change events
-        _.each(this.groups, _.bind(function (group) {
-            this.listenTo(group, 'g:changed', this._updateGroup);
-        }, this));
+        _.each(this.groups, (group) => {
+            this.listenTo(group, 'g:changed', () => {
+                this._updateGroup(group);
+            });
+        });
 
         // possible values that determine rendered behavior for "Home":
         //   - model: show this model as Home
@@ -101,6 +103,8 @@ var RootSelectorWidget = View.extend({
                 format: this._formatName
             })
         );
+
+        return this;
     },
 
     /**
@@ -162,4 +166,3 @@ var RootSelectorWidget = View.extend({
 });
 
 export default RootSelectorWidget;
-

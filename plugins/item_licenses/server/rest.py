@@ -18,30 +18,25 @@
 ###############################################################################
 
 from girder.api import access
-from girder.api.describe import Description, describeRoute
+from girder.api.describe import Description, autoDescribeRoute
 from girder.api.rest import boundHandler
 from girder.constants import SettingDefault
+from girder.models.setting import Setting
 
 from .constants import PluginSettings
 
 
 @access.user
-@boundHandler()
-@describeRoute(
+@boundHandler
+@autoDescribeRoute(
     Description('Get list of item licenses.')
     .param('default', 'Whether to return the default list of item licenses.',
            required=False, dataType='boolean', default=False)
 )
-def getLicenses(self, params):
-    """
-    Get list of item licenses.
-    """
-    licenses = None
-
-    default = self.boolParam('default', params, default=False)
+def getLicenses(self, default):
     if default:
         licenses = SettingDefault.defaults[PluginSettings.LICENSES]
     else:
-        licenses = self.model('setting').get(PluginSettings.LICENSES)
+        licenses = Setting().get(PluginSettings.LICENSES)
 
     return licenses

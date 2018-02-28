@@ -1,20 +1,22 @@
-*.py[cod]
-node_modules
+# Build outputs
+build/
 docs/_build
 docs/_output
-.coverage*
-girder.egg-info
-.DS_Store
-.*.swp
-.*.swo
-.vagrant
-phantom-*.png
-phantom_*.png
 girder-*.tar.gz
+node_modules/
+*.egg-info
+
+# Toolchain generated
 __pycache__
-### PyCharm ###
-.idea/
-.PyCharm50/
 .eslintcache
 /npm-debug.log
+.vagrant
+*.py[cod]
 **/*.retry
+
+# IDE / OS generated
+.DS_Store
+.idea/
+.PyCharm50/
+.*.swo
+.*.swp

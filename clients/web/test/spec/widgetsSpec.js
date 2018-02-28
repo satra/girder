@@ -1,35 +1,42 @@
-/* globals girderTest, runs, waitsFor, expect, describe, it */
-
-/**
- * Start the girder backbone app.
- */
 girderTest.startApp();
 
-function _setProgress(test, duration) {
+function _setProgress(test, duration, resourceId, resourceName) {
     /* Set or update a current progress notification.
      *
      * :param test: test parameter to send to the webclienttest/progress
      *     endpoint
      * :param duration: duration to send to the endpoint
+     * :param resourceId: optional resource ID that the progress notification
+     *     is associated with.
+     * : param resourceName: optional resource type that the progress notification
+     *     is associated with.
      */
-    girder.rest.restRequest({path: 'webclienttest/progress', type: 'GET',
-                        data: {test: test, duration: duration}});
+    girder.rest.restRequest({
+        url: 'webclienttest/progress',
+        method: 'GET',
+        data: {
+            test: test,
+            duration: duration,
+            resourceId: resourceId,
+            resourceName: resourceName
+        }
+    });
 }
 
 describe('Test widgets that are not covered elsewhere', function () {
     it('register a user',
         girderTest.createUser('admin',
-                              'admin@email.com',
-                              'Admin',
-                              'Admin',
-                              'adminpassword!'));
+            'admin@email.com',
+            'Admin',
+            'Admin',
+            'adminpassword!'));
 
     it('test task progress widget', function () {
-        var errorCalled = 0, onMessageError = 0;
+        var errorCalled = 0, onmessageSpy, stream;
 
         runs(function () {
             expect($('#g-app-progress-container:visible').length).toBe(0);
-            _setProgress('success', 0);
+            _setProgress('success', 0, null, null);
         });
         waitsFor(function () {
             return $('.g-task-progress-title').text() === 'Progress Test';
@@ -39,7 +46,7 @@ describe('Test widgets that are not covered elsewhere', function () {
         }, 'progress to be complete');
 
         runs(function () {
-            _setProgress('error', 0);
+            _setProgress('error', 0, null, null);
         });
         waitsFor(function () {
             return $('.g-task-progress-title:last').text() === 'Progress Test';
@@ -49,38 +56,49 @@ describe('Test widgets that are not covered elsewhere', function () {
         }, 'progress to report an error');
 
         runs(function () {
-            var origOnMessage = girder.utilities.eventStream._eventSource.onmessage;
-            girder.utilities.eventStream._eventSource.onmessage = function (e) {
+            onmessageSpy = spyOn(girder.utilities.eventStream._eventSource, 'onmessage').andCallFake(function (e) {
                 try {
-                    origOnMessage(e);
+                    onmessageSpy.originalValue(e);
                 } catch (err) {
-                    onMessageError += 1;
+                    onmessageSpy.errorCount += 1;
                 }
-            };
-            var stream = girder.events._events['g:navigateTo'][0].ctx.progressListView.eventStream;
+            });
+            onmessageSpy.errorCount = 0;
+
+            stream = girder.events._events['g:navigateTo'][0].ctx.progressListView.eventStream;
             stream.on('g:error', function () { errorCalled += 1; });
             stream.on('g:event.progress', function () {
-                throw 'intentional error';
+                throw new Error('intentional error');
             });
-            _setProgress('success', 0);
+            _setProgress('success', 0, null, null);
         });
         waitsFor(function () {
-            return onMessageError === 1;
+            return onmessageSpy.errorCount === 1;
         }, 'bad progress callback to be tried');
         runs(function () {
-            _setProgress('error', 0);
+            _setProgress('error', 0, null, null);
         });
         waitsFor(function () {
-            return onMessageError === 2;
+            return onmessageSpy.errorCount === 2;
         }, 'bad progress callback to be tried again');
         runs(function () {
             expect(errorCalled).toBe(0);
         });
 
         runs(function () {
+            /* Create a progress notification related to a specific resource */
+            _setProgress('success', 0, 'some_folder_id', 'folder');
+        });
+
+        waitsFor(function () {
+            /* Make sure the progress notification links to that resource */
+            return $('.g-task-progress-title:last a').attr('href') === '#folder/some_folder_id';
+        }, 'progress for a folder to be shown');
+
+        runs(function () {
             /* Ask for a long test, so that on slow machines we can still
              * detect a partial progress. */
-            _setProgress('success', 100);
+            _setProgress('success', 100, null, null);
         });
         waitsFor(function () {
             return $('.g-task-progress-message:last').text() === 'Progress Message';
@@ -100,13 +118,28 @@ describe('Test widgets that are not covered elsewhere', function () {
          * less than a second left to wait for the two previous success
          * messages to vanish (but the error message might still be around). */
         waitsFor(function () {
-            return $('.g-progress-widget-container').length < 4;
+            return $('.g-progress-widget-container').length < 5;
         }, 'at least the first progress to be hidden');
 
         runs(function () {
-            girder.rest.restRequest({path: 'webclienttest/progress/stop',
-                                type: 'PUT', async: false});
+            girder.utilities.eventStream.settings._heartbeatTimeout = 1;
+        }, 'ask event stream to stop');
+        waitsFor(function () {
+            return $('.g-progress-widget-container').length === 0;
+        }, 'Progress to clear.');
+
+        runs(function () {
+            girder.utilities.eventStream.settings._heartbeatTimeout = 5000;
+            girder.rest.restRequest({
+                url: 'webclienttest/progress/stop',
+                method: 'PUT',
+                async: false
+            });
         });
+        runs(function () {
+            stream.off('g:error');
+            stream.off('g:event.progress');
+        }, 'turn off stream events');
     });
 });
 

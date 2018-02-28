@@ -19,46 +19,42 @@
  * the DllPlugin for dynamic loading, each individual bundle has its own config options
  * that can extend these.
  */
-var webpack = require('webpack');
+var path = require('path');
 
+var webpack = require('webpack');
 var ExtractTextPlugin = require('extract-text-webpack-plugin');
 
 var paths = require('./webpack.paths.js');
-var es2015Preset = require.resolve('babel-preset-es2015');
-var istanbulPlugin = require.resolve('babel-plugin-istanbul');
+// Resolving the Babel presets here is required to support symlinking plugin directories from
+// outside Girder's file tree
+const babelPresets = require.resolve('babel-preset-env');
 
 function fileLoader() {
     return {
         loader: 'file-loader',
-        query: {
-            name: 'assets/[name]-[hash:8].[ext]'
+        options: {
+            name: '[name]-[hash:8].[ext]',
+            outputPath: 'assets/'
         }
     };
 }
 
-function urlLoader(options) {
-    options = options || {};
-    var loader = {
-        loader: 'url-loader',
-        query: {
-            limit: 4096
-        }
-    };
-    if (options.mimetype) {
-        loader.query.mimetype = options.mimetype;
-    }
-    return loader;
-}
-
-var loaderPaths = [/clients\/web\/src/];
-var loaderPathsNodeModules = loaderPaths.concat([/node_modules/]);
+var loaderPaths = [path.resolve('clients', 'web', 'src')];
+var loaderPathsNodeModules = loaderPaths.concat([path.resolve('node_modules')]);
 
 module.exports = {
     output: {
-        path: paths.web_built,
-        filename: '[name].min.js'
+        filename: '[name].min.js',
+        path: paths.web_built
+        // publicPath must be set to Girder's externally-served static path for built outputs
+        // (typically '/static/built/'). This will be done at runtime with
+        // '__webpack_public_path__', since it's not always known at build-time.
     },
     plugins: [
+        // Exclude all of Moment.js's extra locale files except English
+        // to reduce build size.  See https://webpack.js.org/plugins/context-replacement-plugin/
+        new webpack.ContextReplacementPlugin(/moment[/\\]locale$/, /en/),
+
         // Automatically detect jQuery and $ as free var in modules
         // and inject the jquery library. This is required by many jquery plugins
         new webpack.ProvidePlugin({
@@ -66,72 +62,77 @@ module.exports = {
             $: 'jquery',
             'window.jQuery': 'jquery'
         }),
-        new ExtractTextPlugin({
-            filename: '[name].min.css',
-            allChunks: true,
-            disable: false
-        })
+
+        // Disable writing the output file if a build error occurs
+        new webpack.NoEmitOnErrorsPlugin()
     ],
     module: {
-        loaders: [
-            // ES2015
+        rules: [
+            // ES2015+
             {
-                test: /\.js$/,
-                include: loaderPaths,
-                loader: 'babel-loader',
-                exclude: /node_modules/,
-                query: {
-                    presets: [es2015Preset],
-                    env: {
-                        cover: {
-                            plugins: [[
-                                istanbulPlugin, {
-                                    exclude: ['**/*.pug', '**/*.jade', 'node_modules/**/*']
-                                }
-                            ]]
+                resource: {
+                    test: /\.js$/,
+                    include: loaderPaths,
+                    exclude: /node_modules/
+                },
+                use: [
+                    {
+                        loader: 'babel-loader',
+                        options: {
+                            // Without any options, 'preset-env' behavies like 'preset-latest'
+                            presets: [babelPresets],
+                            cacheDirectory: true
                         }
                     }
-                }
-            },
-            // JSON files
-            {
-                test: /\.json$/,
-                include: loaderPaths,
-                loader: 'json-loader'
+                ]
             },
             // Stylus
             {
-                test: /\.styl$/,
-                include: loaderPaths,
-                loaders: [
-                    ExtractTextPlugin.extract('style-loader'),
-                    'css-loader',
-                    {
-                        loader: 'stylus-loader',
-                        query: {
-                            'resolve url': true
+                resource: {
+                    test: /\.styl$/,
+                    include: loaderPaths
+                },
+                use: ExtractTextPlugin.extract({
+                    use: [
+                        'css-loader',
+                        {
+                            loader: 'stylus-loader',
+                            options: {
+                                // The 'resolve url' option is not well-documented, but was
+                                // added at https://github.com/shama/stylus-loader/pull/6
+                                'resolve url': true,
+                                import: [
+                                    '~nib/index.styl'
+                                ]
+                            }
                         }
-                    }
-                ]
+                    ],
+                    fallback: 'style-loader'
+                })
             },
             // CSS
             {
-                test: /\.css$/,
-                include: loaderPathsNodeModules,
-                loaders: [
-                    ExtractTextPlugin.extract('style-loader'),
-                    'css-loader'
-                ]
+                resource: {
+                    test: /\.css$/,
+                    include: loaderPathsNodeModules
+                },
+                use: ExtractTextPlugin.extract({
+                    use: ['css-loader'],
+                    fallback: 'style-loader'
+                })
             },
             // Pug
             {
-                test: /\.(pug|jade)$/,
-                include: loaderPaths,
-                loaders: [
+                resource: {
+                    test: /\.(pug|jade)$/,
+                    include: loaderPaths
+                },
+                use: [
                     {
                         loader: 'babel-loader',
-                        query: {
-                            presets: [es2015Preset]
+                        options: {
+                            presets: [babelPresets],
+                            cacheDirectory: true
                         }
                     },
                     'pug-loader'
@@ -139,76 +140,72 @@ module.exports = {
             },
             // PNG, JPEG
             {
-                test: /\.(png|jpg)$/,
-                include: loaderPathsNodeModules,
-                loaders: [
+                resource: {
+                    test: /\.(png|jpg|gif)$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             },
             // WOFF
             {
-                test: /\.woff(\?v=\d+\.\d+\.\d+)?$/,
-                include: loaderPathsNodeModules,
-                loaders: [
-                    urlLoader({ mimetype: 'application/font-woff' }),
+                resource: {
+                    test: /\.woff(\?v=\d+\.\d+\.\d+)?$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             },
             // WOFF2
             {
-                test: /\.woff2(\?v=\d+\.\d+\.\d+)?$/,
-                include: loaderPathsNodeModules,
-                loaders: [
-                    urlLoader({ mimetype: 'application/font-woff2' }),
+                resource: {
+                    test: /\.woff2(\?v=\d+\.\d+\.\d+)?$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             },
             // TTF
             {
-                test: /\.ttf(\?v=\d+\.\d+\.\d+)?$/,
-                include: loaderPathsNodeModules,
-                loaders: [
-                    urlLoader({ mimetype: 'application/octet-stream' }),
+                resource: {
+                    test: /\.ttf(\?v=\d+\.\d+\.\d+)?$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             },
             // EOT
             {
-                test: /\.eot(\?v=\d+\.\d+\.\d+)?$/,
-                include: loaderPathsNodeModules,
-                loaders: [
+                resource: {
+                    test: /\.eot(\?v=\d+\.\d+\.\d+)?$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             },
             // SVG
             {
-                test: /\.svg(\?v=\d+\.\d+\.\d+)?$/,
-                include: loaderPathsNodeModules,
-                loaders: [
-                    urlLoader({ mimetype: 'image/svg+xml' }),
+                resource: {
+                    test: /\.svg(\?v=\d+\.\d+\.\d+)?$/,
+                    include: loaderPathsNodeModules
+                },
+                use: [
                     fileLoader()
                 ]
             }
-        ],
-        noParse: [
-            // Avoid warning:
-            //   This seems to be a pre-built javascript file. Though this is
-            //   possible, it's not recommended. Try to require the original source
-            //   to get better results.
-            // This needs fixing later, as Webpack works better when provided with source.
-            // /node_modules\/pug/,
-            // /node_modules\/remarkable/
         ]
     },
     resolve: {
         alias: {
             'girder': paths.web_src
         },
-        modules: [
-            paths.clients_web,
-            paths.plugins,
-            paths.node_modules
-        ]
+        extensions: ['.js'],
+        symlinks: false
     },
     node: {
         canvas: 'empty',
@@ -217,5 +214,20 @@ module.exports = {
         jsdom: 'empty',
         system: 'empty',
         xmldom: 'empty'
+    },
+    stats: {
+        assets: true,
+        children: false,
+        chunks: false,
+        chunkModules: false,
+        colors: true,
+        errorDetails: true,
+        hash: false,
+        modules: false,
+        reasons: false,
+        timings: false
+    },
+    watchOptions: {
+        ignored: /node_modules/
     }
 };

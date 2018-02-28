@@ -1,6 +1,3 @@
-/**
- * Start the girder backbone app.
- */
 girderTest.startApp();
 
 /* Search for a name on the members search panel, and invite or add the first
@@ -27,11 +24,11 @@ function _invite(name, level, action, check) {
     }, 'search to return (' + name + ')');
     runs(function () {
         var results = $('.g-group-invite-container li.g-search-result');
-        expect(results.length).toBe(1);
+        expect(results.length).toBe(2); // 1 + '...' element
 
-        expect(results.find('a[resourcetype="user"]').length).toBe(1);
+        expect(results.find('a[data-resource-type="user"]').length).toBe(1);
 
-        results.find('a[resourcetype="user"]').click();
+        results.find('a[data-resource-type="user"]').click();
     });
     girderTest.waitForDialog();
     waitsFor(function () {
@@ -77,13 +74,13 @@ function _testDirectAdd(policy, curUser, curSetting) {
         if (curUser !== 'admin') {
             girderTest.logout()();
             girderTest.login('admin', 'Admin', 'Admin',
-                             'adminpassword!')();
+                'adminpassword!')();
             curUser = 'admin';
         }
         runs(function () {
-            var resp = girder.rest.restRequest({
-                path: 'system/setting',
-                type: 'PUT',
+            girder.rest.restRequest({
+                url: 'system/setting',
+                method: 'PUT',
                 data: {
                     key: 'core.add_to_group_policy',
                     value: policy.setting
@@ -114,7 +111,7 @@ function _testDirectAdd(policy, curUser, curSetting) {
         girderTest.logout()();
         if (policy.user === 'admin') {
             girderTest.login('admin', 'Admin', 'Admin',
-                             'adminpassword!')();
+                'adminpassword!')();
         } else {
             girderTest.login(
                 'user' + policy.user, 'User' + policy.user, 'User',
@@ -136,13 +133,13 @@ function _testDirectAdd(policy, curUser, curSetting) {
                    $('.g-group-mods>li').length === 1 &&
                    $('.g-group-admins>li').length === 2;
         }, 'the group page to load');
-     }
+    }
     /* If the invite search field exists or we think it should,
      * test that the add button exists as we expect */
     if (policy.mayAdd === null) {
         runs(function () {
             expect($('.g-group-invite-container input.g-search-field').length
-                ).toBe(0);
+            ).toBe(0);
         });
     } else {
         _invite('admin', 'member', 'add', policy.mayAdd);
@@ -150,13 +147,12 @@ function _testDirectAdd(policy, curUser, curSetting) {
 }
 
 describe('Test group actions', function () {
-
     it('register a user (first is admin)',
         girderTest.createUser('admin',
-                              'admin@email.com',
-                              'Admin',
-                              'Admin',
-                              'adminpassword!'));
+            'admin@email.com',
+            'Admin',
+            'Admin',
+            'adminpassword!'));
 
     it('go to groups page', girderTest.goToGroupsPage());
 
@@ -167,7 +163,7 @@ describe('Test group actions', function () {
     });
 
     it('Create a private group',
-       girderTest.createGroup('privGroup', 'private group', false));
+        girderTest.createGroup('privGroup', 'private group', false));
 
     it('Test that anonymous loading private group prompts login', function () {
         var privateGroupFragment = Backbone.history.fragment;
@@ -177,7 +173,7 @@ describe('Test group actions', function () {
     it('go back to groups page', girderTest.goToGroupsPage());
 
     it('Create a public group',
-       girderTest.createGroup('pubGroup', 'public group', true));
+        girderTest.createGroup('pubGroup', 'public group', true));
 
     it('Open edit dialog and check url state', function () {
         waitsFor(function () {
@@ -211,7 +207,7 @@ describe('Test group actions', function () {
         girderTest.waitForLoad();
     });
 
-    it('have the admin remove and then force add himself to the group', function () {
+    it('have the admin remove and then force add themself to the group', function () {
         runs(function () {
             $('.g-group-admin-remove').click();
         });
@@ -222,7 +218,7 @@ describe('Test group actions', function () {
             return $('#g-confirm-button').text() === 'Yes';
         }, 'the confirmation button to appear');
 
-        // Admin user removes himself from the group
+        // Admin user removes themself from the group
         runs(function () {
             $('#g-confirm-button').click();
         });
@@ -434,7 +430,7 @@ describe('Test group actions', function () {
             for (var i = 1; i <= 3; i += 1) {
                 girderTest.logout()();
                 girderTest.createUser('user' + i, 'user' + i + '@email.com',
-                                      'User' + i, 'User', 'password!')();
+                    'User' + i, 'User', 'password!')();
             }
         });
         /* Use the admin user to force-add certain users to the group */

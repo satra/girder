@@ -36,17 +36,45 @@ import six
 import sys
 import yaml
 import importlib
+import traceback
 
 import pkg_resources
 from pkg_resources import iter_entry_points
 
-from girder import logprint
+from girder import logprint, logger
 from girder.constants import GIRDER_ROUTE_ID, GIRDER_STATIC_ROUTE_ID, PACKAGE_DIR, ROOT_DIR, \
     ROOT_PLUGINS_PACKAGE, SettingKey
-from girder.models.model_base import ValidationException
-from girder.utility import mail_utils, model_importer
+from girder.exceptions import ValidationException
+from girder.models.setting import Setting
+from girder.utility import mail_utils
 
 _pluginWebroots = {}
+_pluginFailureInfo = {}
+
+
+def _recordPluginFailureInfo(plugin, traceback):
+    """
+    Record information when a plugin fails to load.
+
+    :param plugin: The name of the plugin that failed to load.
+    :type plugin: str
+    :param traceback: The traceback of the failure.
+    :type trackback: str
+    """
+    _pluginFailureInfo[plugin] = {
+        'traceback': traceback
+    }
+
+
+def _clearPluginFailureInfo(plugin):
+    """
+    If a plugin loaded, clear any failure information that may have been set by
+    an earlier failed attempt.
+
+    :param plugin: The name of the plugin that loaded.
+    :type plugin: str
+    """
+    _pluginFailureInfo.pop(plugin, None)
 
 
 def loadPlugins(plugins, root, appconf, apiRoot=None, buildDag=True):
@@ -85,23 +113,38 @@ def loadPlugins(plugins, root, appconf, apiRoot=None, buildDag=True):
     for plugin in plugins:
         try:
             root, appconf, apiRoot = loadPlugin(plugin, root, appconf, apiRoot)
+            _clearPluginFailureInfo(plugin=plugin)
             logprint.success('Loaded plugin "%s"' % plugin)
         except Exception:
+            _recordPluginFailureInfo(plugin=plugin, traceback=traceback.format_exc())
             logprint.exception('ERROR: Failed to load plugin "%s":' % plugin)
 
     return root, appconf, apiRoot
 
 
-def getToposortedPlugins(plugins, ignoreMissing=False):
+def getToposortedPlugins(plugins=None, ignoreMissing=False, keys=('dependencies',)):
     """
     Given a set of plugins to load, construct the full DAG of required plugins
     to load and yields them in toposorted order.
-    """
-    plugins = set(plugins)
 
+    :param plugins: A set of plugins that must be in the output list. If you want
+        to toposort all available plugins, omit this parameter.
+    :type plugins: iterable of str
+    :param ignoreMissing: Normally if one of the plugins specified does not exist,
+        this raises a ValidationError. Set this to False to suppress that and instead
+        print an error message and continue.
+    :type ignoreMissing: bool
+    :param keys: Keys that should be used to determine dependencies.
+    :type keys: list of str
+    """
     allPlugins = findAllPlugins()
     dag = {}
     visited = set()
+
+    if plugins is None:
+        plugins = set(allPlugins.keys())
+    else:
+        plugins = set(plugins)
 
     def addDeps(plugin):
         if plugin not in allPlugins:
@@ -112,13 +155,17 @@ def getToposortedPlugins(plugins, ignoreMissing=False):
             else:
                 raise ValidationException(message)
 
-        deps = allPlugins[plugin]['dependencies']
+        deps = set()
+        for key in keys:
+            deps |= allPlugins[plugin][key]
         dag[plugin] = deps
 
         for dep in deps:
             if dep in visited:
-                return
+                continue
             visited.add(dep)
+            if dep not in plugins:
+                logger.info('Adding plugin %s because %s requires it' % (dep, plugin))
             addDeps(dep)
 
     for plugin in plugins:
@@ -172,44 +219,39 @@ def loadPlugin(name, root, appconf, apiRoot=None):
 
     moduleName = '.'.join((ROOT_PLUGINS_PACKAGE, name))
 
-    if moduleName not in sys.modules:
-        fp = None
-        try:
-            # @todo this query is run for every plugin that's loaded
-            setting = model_importer.ModelImporter().model('setting')
-            routeTable = setting.get(SettingKey.ROUTE_TABLE)
+    fp = None
+    try:
+        # @todo this query is run for every plugin that's loaded
+        routeTable = Setting().get(SettingKey.ROUTE_TABLE)
 
-            info = {
-                'name': name,
-                'config': appconf,
-                'serverRoot': root,
-                'serverRootPath': routeTable[GIRDER_ROUTE_ID],
-                'apiRoot': apiRoot,
-                'staticRoot': routeTable[GIRDER_STATIC_ROUTE_ID],
-                'pluginRootDir': os.path.abspath(pluginDir)
-            }
+        info = {
+            'name': name,
+            'config': appconf,
+            'serverRoot': root,
+            'serverRootPath': routeTable[GIRDER_ROUTE_ID],
+            'apiRoot': apiRoot,
+            'staticRoot': routeTable[GIRDER_STATIC_ROUTE_ID],
+            'pluginRootDir': os.path.abspath(pluginDir)
+        }
 
-            if pluginLoadMethod is None:
-                fp, pathname, description = imp.find_module(
-                    'server', [pluginDir]
-                )
-                module = imp.load_module(moduleName, fp, pathname, description)
-                module.PLUGIN_ROOT_DIR = pluginDir
-                girder.plugins.__dict__[name] = module
-                pluginLoadMethod = getattr(module, 'load', None)
+        if pluginLoadMethod is None:
+            fp, pathname, description = imp.find_module('server', [pluginDir])
+            module = imp.load_module(moduleName, fp, pathname, description)
+            module.PLUGIN_ROOT_DIR = pluginDir
+            girder.plugins.__dict__[name] = module
+            pluginLoadMethod = getattr(module, 'load', None)
 
-            if pluginLoadMethod is not None:
-                sys.modules[moduleName] = module
-                pluginLoadMethod(info)
+        if pluginLoadMethod is not None:
+            sys.modules[moduleName] = module
+            pluginLoadMethod(info)
 
-            root, appconf, apiRoot = (
-                info['serverRoot'], info['config'], info['apiRoot'])
+        root, appconf, apiRoot = (info['serverRoot'], info['config'], info['apiRoot'])
 
-        finally:
-            if fp:
-                fp.close()
+    finally:
+        if fp:
+            fp.close()
 
-        return root, appconf, apiRoot
+    return root, appconf, apiRoot
 
 
 def getPluginDir():
@@ -246,6 +288,9 @@ def findEntryPointPlugins(allPlugins):
                     try:
                         data = json.load(codecs.getreader('utf8')(conf))
                     except ValueError:
+                        _recordPluginFailureInfo(
+                            plugin=entry_point.name,
+                            traceback=traceback.format_exc())
                         logprint.exception(
                             'ERROR: Plugin "%s": plugin.json is not valid '
                             'JSON.' % entry_point.name)
@@ -255,13 +300,29 @@ def findEntryPointPlugins(allPlugins):
                     try:
                         data = yaml.safe_load(conf)
                     except yaml.YAMLError:
+                        _recordPluginFailureInfo(
+                            plugin=entry_point.name,
+                            traceback=traceback.format_exc())
                         logprint.exception(
                             'ERROR: Plugin "%s": plugin.yml is not valid '
                             'YAML.' % entry_point.name)
-        except ImportError:
+        except (ImportError, SystemError):
+            # Fall through and just try to load the entry point below.  If
+            # there is still an error, we'll log it there.
             pass
         if data == {}:
-            data = getattr(entry_point.load(), 'config', {})
+            try:
+                data = getattr(entry_point.load(), 'config', {})
+            except (ImportError, SystemError):
+                # If the plugin failed to load via entrypoint, but is in the
+                # plugins directory, it may still load.  We mark and report the
+                # failure; if it loads later, the failure will be cleared, but
+                # the report is still desired.
+                _recordPluginFailureInfo(
+                    plugin=entry_point.name, traceback=traceback.format_exc())
+                logprint.exception(
+                    'ERROR: Plugin "%s": could not be loaded by entrypoint.' % entry_point.name)
+                continue
         allPlugins[entry_point.name].update(data)
         allPlugins[entry_point.name]['dependencies'] = set(
             allPlugins[entry_point.name]['dependencies'])
@@ -290,6 +351,7 @@ def findAllPlugins():
                 try:
                     data = json.load(conf)
                 except ValueError:
+                    _recordPluginFailureInfo(plugin=plugin, traceback=traceback.format_exc())
                     logprint.exception(
                         'ERROR: Plugin "%s": plugin.json is not valid '
                         'JSON.' % plugin)
@@ -298,6 +360,7 @@ def findAllPlugins():
                 try:
                     data = yaml.safe_load(conf)
                 except yaml.YAMLError:
+                    _recordPluginFailureInfo(plugin=plugin, traceback=traceback.format_exc())
                     logprint.exception(
                         'ERROR: Plugin "%s": plugin.yml is not valid '
                         'YAML.' % plugin)
@@ -305,8 +368,10 @@ def findAllPlugins():
         allPlugins[plugin] = {
             'name': data.get('name', plugin),
             'description': data.get('description', ''),
+            'url': data.get('url', ''),
             'version': data.get('version', ''),
-            'dependencies': set(data.get('dependencies', []))
+            'dependencies': set(data.get('dependencies', [])),
+            'staticWebDependencies': set(data.get('staticWebDependencies', []))
         }
     return allPlugins
 
@@ -384,6 +449,10 @@ def registerPluginWebroot(webroot, name):
     global _pluginWebroots
 
     _pluginWebroots[name] = webroot
+
+
+def getPluginFailureInfo():
+    return _pluginFailureInfo
 
 
 class config(object):  # noqa: class name

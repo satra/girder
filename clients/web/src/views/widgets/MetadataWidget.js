@@ -19,9 +19,10 @@ import JSONEditor from 'jsoneditor/dist/jsoneditor.js'; // can't 'jsoneditor'
 import 'jsoneditor/dist/jsoneditor.css';
 
 import 'bootstrap/js/dropdown';
-import 'bootstrap/js/tooltip';
 
 var MetadatumWidget = View.extend({
+    className: 'g-widget-metadata-row',
+
     events: {
         'click .g-widget-metadata-edit-button': 'editMetadata'
     },
@@ -65,9 +66,7 @@ var MetadatumWidget = View.extend({
 
     // @todo too much duplication with editMetadata
     toggleEditor: function (event, newEditorMode, existingEditor, overrides) {
-        var fromEditorMode =
-                (existingEditor instanceof JsonMetadatumEditWidget)
-                    ? 'json' : 'simple';
+        var fromEditorMode = (existingEditor instanceof JsonMetadatumEditWidget) ? 'json' : 'simple';
         var newValue = (overrides || {}).value || existingEditor.$el.attr('g-value');
         if (!this._validate(fromEditorMode, newEditorMode, newValue)) {
             return;
@@ -95,16 +94,13 @@ var MetadatumWidget = View.extend({
     },
 
     editMetadata: function (event) {
-        var row = $(event.currentTarget.parentElement);
-        row.addClass('editing').empty();
-
-        var newEditRow = row.append('<div></div>');
+        this.$el.addClass('editing');
+        this.$el.empty();
 
         var opts = {
-            el: newEditRow.find('div'),
             item: this.parentView.item,
-            key: row.attr('g-key'),
-            value: row.attr('g-value'),
+            key: this.$el.attr('g-key'),
+            value: this.$el.attr('g-value'),
             accessLevel: this.accessLevel,
             newDatum: false,
             parentView: this,
@@ -117,7 +113,7 @@ var MetadatumWidget = View.extend({
         // If they're trying to open false, null, 6, etc which are not stored as strings
         if (this.mode === 'json') {
             try {
-                var jsonValue = JSON.parse(row.attr('g-value'));
+                var jsonValue = JSON.parse(this.$el.attr('g-value'));
 
                 if (jsonValue !== undefined && !_.isObject(jsonValue)) {
                     opts.value = jsonValue;
@@ -125,12 +121,13 @@ var MetadatumWidget = View.extend({
             } catch (e) {}
         }
 
-        this.parentView.modes[this.mode].editor(opts).render();
+        this.parentView.modes[this.mode].editor(opts)
+            .render()
+            .$el.appendTo(this.$el);
     },
 
     render: function () {
         this.$el.attr({
-            class: 'g-widget-metadata-row',
             'g-key': this.key,
             'g-value': _.bind(this.parentView.modes[this.mode].displayValue, this)()
         }).empty();
@@ -190,27 +187,29 @@ var MetadatumEditWidget = View.extend({
 
     deleteMetadatum: function (event) {
         event.stopImmediatePropagation();
-        var metadataList = $(event.currentTarget.parentElement).parent();
+        const target = $(event.currentTarget);
+        var metadataList = target.parent().parent();
         var params = {
             text: 'Are you sure you want to delete the metadatum <b>' +
                 _.escape(this.key) + '</b>?',
             escapedHtml: true,
             yesText: 'Delete',
-            confirmCallback: _.bind(function () {
+            confirmCallback: () => {
                 this.item.removeMetadata(this.key, function () {
                     metadataList.remove();
                 }, null, {
                     field: this.fieldName,
                     path: this.apiPath
                 });
-            }, this)
+            }
         };
         confirm(params);
     },
 
     cancelEdit: function (event) {
         event.stopImmediatePropagation();
-        var curRow = $(event.currentTarget.parentElement).parent();
+        const target = $(event.currentTarget);
+        var curRow = target.parent().parent();
         if (this.newDatum) {
             curRow.remove();
         } else {
@@ -220,7 +219,8 @@ var MetadatumEditWidget = View.extend({
 
     save: function (event, value) {
         event.stopImmediatePropagation();
-        var curRow = $(event.currentTarget.parentElement),
+        const target = $(event.currentTarget);
+        var curRow = target.parent(),
             tempKey = curRow.find('.g-widget-metadata-key-input').val(),
             tempValue = (value !== undefined) ? value : curRow.find('.g-widget-metadata-value-input').val();
 
@@ -232,7 +232,7 @@ var MetadatumEditWidget = View.extend({
             return;
         }
 
-        var saveCallback = _.bind(function () {
+        var saveCallback = () => {
             this.key = tempKey;
             this.value = tempValue;
 
@@ -248,7 +248,7 @@ var MetadatumEditWidget = View.extend({
             this.parentView.render();
 
             this.newDatum = false;
-        }, this);
+        };
 
         var errorCallback = function (out) {
             events.trigger('g:alert', {
@@ -289,13 +289,6 @@ var MetadatumEditWidget = View.extend({
         }));
         this.$el.find('.g-widget-metadata-key-input').focus();
 
-        this.$('[title]').tooltip({
-            container: this.$el,
-            placement: 'bottom',
-            animation: false,
-            delay: {show: 100}
-        });
-
         return this;
     }
 });
@@ -322,10 +315,11 @@ var JsonMetadatumEditWidget = MetadatumEditWidget.extend({
     render: function () {
         MetadatumEditWidget.prototype.render.apply(this, arguments);
 
-        this.editor = new JSONEditor(this.$el.find('.g-json-editor')[0], {
+        const jsonEditorEl = this.$el.find('.g-json-editor');
+        this.editor = new JSONEditor(jsonEditorEl[0], {
             mode: 'tree',
             modes: ['code', 'tree'],
-            error: function () {
+            onError: () => {
                 events.trigger('g:alert', {
                     text: 'The field contains invalid JSON and can not be viewed in Tree Mode.',
                     type: 'warning'
@@ -442,13 +436,10 @@ var MetadataWidget = View.extend({
 
     addMetadata: function (event, mode) {
         var EditWidget = this.modes[mode].editor;
-        var newRow = $('<div>').attr({
-            class: 'g-widget-metadata-row editing'
-        }).appendTo(this.$el.find('.g-widget-metadata-container'));
         var value = (mode === 'json') ? '{}' : '';
 
         var widget = new MetadatumWidget({
-            el: newRow,
+            className: 'g-widget-metadata-row editing',
             mode: mode,
             key: '',
             value: value,
@@ -460,11 +451,9 @@ var MetadataWidget = View.extend({
             onMetadataEdited: this.onMetadataEdited,
             onMetadataAdded: this.onMetadataAdded
         });
-
-        var newEditRow = $('<div>').appendTo(widget.$el);
+        widget.$el.appendTo(this.$('.g-widget-metadata-container'));
 
         new EditWidget({
-            el: newEditRow,
             item: this.item,
             key: '',
             value: value,
@@ -475,7 +464,9 @@ var MetadataWidget = View.extend({
             parentView: widget,
             onMetadataEdited: this.onMetadataEdited,
             onMetadataAdded: this.onMetadataAdded
-        }).render();
+        })
+            .render()
+            .$el.appendTo(widget.$el);
     },
 
     render: function () {
@@ -505,13 +496,6 @@ var MetadataWidget = View.extend({
                 onMetadataAdded: this.onMetadataAdded
             }).render().$el);
         }, this);
-
-        this.$('.g-widget-metadata-add-button').tooltip({
-            container: this.$el,
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
 
         return this;
     }

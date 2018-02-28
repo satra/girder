@@ -21,16 +21,17 @@ import bson.json_util
 
 from girder import events
 from girder.constants import AccessType
+from girder.exceptions import RestException
 from girder.utility.model_importer import ModelImporter
 from girder.api.describe import Description, describeRoute
-from girder.api.rest import Resource, RestException
+from girder.api.rest import Resource
 from girder.api import access
 
 
 class ResourceExt(Resource):
     @access.public
     @describeRoute(
-        Description('Run any search against a set of mongo collections.')
+        Description('Run any search against a set of MongoDB collections.')
         .notes('Results will be filtered by permissions.')
         .param('type', 'The name of the collection to search, e.g. "item".')
         .param('q', 'The search query as a JSON object.')
@@ -61,7 +62,7 @@ class ResourceExt(Resource):
         except ValueError:
             raise RestException('The query parameter must be a JSON object.')
 
-        model = ModelImporter().model(coll)
+        model = ModelImporter.model(coll)
         if hasattr(model, 'filterResultsByPermission'):
             cursor = model.find(
                 query, fields=allowed[coll] + ['public', 'access'])

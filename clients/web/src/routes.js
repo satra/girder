@@ -1,4 +1,4 @@
-import _ from 'underscore';
+/* eslint-disable import/first */
 
 import router from 'girder/router';
 import events from 'girder/events';
@@ -124,16 +124,9 @@ router.route('item/:id', 'item', function (itemId, params) {
  * Plugins
  */
 import PluginsView from 'girder/views/body/PluginsView';
+import UsersView from 'girder/views/body/UsersView';
 router.route('plugins', 'plugins', function () {
-    // Fetch the plugin list
-    restRequest({
-        path: 'system/plugins',
-        type: 'GET'
-    }).done(_.bind(function (resp) {
-        events.trigger('g:navigateTo', PluginsView, resp);
-    }, this)).error(_.bind(function () {
-        events.trigger('g:navigateTo', UsersView);
-    }, this));
+    events.trigger('g:navigateTo', PluginsView);
 });
 
 /**
@@ -153,34 +146,25 @@ router.route('useraccount/:id/:tab', 'accountTab', function (id, tab) {
     UserAccountView.fetchAndInit(id, tab);
 });
 router.route('useraccount/:id/token/:token', 'accountToken', function (id, token) {
-    restRequest({
-        path: 'user/password/temporary/' + id,
-        type: 'GET',
-        data: {token: token},
-        error: null
-    }).done(_.bind(function (resp) {
-        resp.user.token = resp.authToken.token;
-        eventStream.close();
-        setCurrentUser(new UserModel(resp.user));
-        eventStream.open();
-        events.trigger('g:login-changed');
-        events.trigger('g:navigateTo', UserAccountView, {
-            user: getCurrentUser(),
-            tab: 'password',
-            temporary: token
+    UserModel.fromTemporaryToken(id, token)
+        .done(() => {
+            events.trigger('g:navigateTo', UserAccountView, {
+                user: getCurrentUser(),
+                tab: 'password',
+                temporary: token
+            });
+        }).fail(() => {
+            router.navigate('users', {trigger: true});
         });
-    }, this)).error(_.bind(function () {
-        router.navigate('users', {trigger: true});
-    }, this));
 });
 
 router.route('useraccount/:id/verification/:token', 'accountVerify', function (id, token) {
     restRequest({
-        path: 'user/' + id + '/verification',
-        type: 'PUT',
+        url: `user/${id}/verification`,
+        method: 'PUT',
         data: {token: token},
         error: null
-    }).done(_.bind(function (resp) {
+    }).done((resp) => {
         if (resp.authToken) {
             resp.user.token = resp.authToken.token;
             eventStream.close();
@@ -195,7 +179,7 @@ router.route('useraccount/:id/verification/:token', 'accountVerify', function (i
             type: 'success',
             timeout: 4000
         });
-    }, this)).error(_.bind(function () {
+    }).fail(() => {
         events.trigger('g:navigateTo', FrontPageView);
         events.trigger('g:alert', {
             icon: 'cancel',
@@ -203,13 +187,12 @@ router.route('useraccount/:id/verification/:token', 'accountVerify', function (i
             type: 'danger',
             timeout: 4000
         });
-    }, this));
+    });
 });
 
 /**
  * Users
  */
-import UsersView from 'girder/views/body/UsersView';
 router.route('users', 'users', function (params) {
     events.trigger('g:navigateTo', UsersView, params || {});
     events.trigger('g:highlightItem', 'UsersView');
@@ -233,5 +216,16 @@ router.route('user/:id/folder/:id', 'userFolder', function (userId, folderId, pa
         folderCreate: params.dialog === 'foldercreate',
         folderEdit: params.dialog === 'folderedit',
         itemCreate: params.dialog === 'itemcreate'
+    });
+});
+
+/**
+ * SearchResults
+ */
+import SearchResultsView from 'girder/views/body/SearchResultsView';
+router.route('search/results', 'SearchResults', function (params) {
+    events.trigger('g:navigateTo', SearchResultsView, {
+        query: params.query,
+        mode: params.mode
     });
 });

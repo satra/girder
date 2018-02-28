@@ -1,3 +1,4 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
 import View from 'girder/views/View';
@@ -20,22 +21,23 @@ var OAuthLoginView = View.extend({
         var redirect = settings.redirect || splitRoute(window.location.href).base;
         this.modeText = settings.modeText || 'log in';
         this.providers = null;
+        this.enablePasswordLogin = _.has(settings, 'enablePasswordLogin') ? settings.enablePasswordLogin : true;
 
         restRequest({
-            path: 'oauth/provider',
+            url: 'oauth/provider',
             data: {
                 redirect: redirect,
                 list: true
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.providers = resp;
             this.render();
-        }, this));
+        });
     },
 
     render: function () {
         if (this.providers === null) {
-            return;
+            return this;
         }
 
         var buttons = [];
@@ -54,9 +56,12 @@ var OAuthLoginView = View.extend({
         if (buttons.length) {
             this.$el.append(OAuthLoginViewTemplate({
                 modeText: this.modeText,
-                buttons: buttons
+                buttons: buttons,
+                enablePasswordLogin: this.enablePasswordLogin
             }));
         }
+
+        return this;
     },
 
     _buttons: {
@@ -79,6 +84,10 @@ var OAuthLoginView = View.extend({
         linkedin: {
             icon: 'linkedin',
             class: 'g-oauth-button-linkedin'
+        },
+        box: {
+            icon: 'box',
+            class: 'g-oauth-button-box'
         }
     }
 });

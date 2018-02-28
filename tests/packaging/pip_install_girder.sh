@@ -16,18 +16,11 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Make sure girder-server entrypoint is on the path
+# Make sure girder entrypoint is on the path
 source "${virtualenv_activate}"
-which girder-server
+which girder
 if [ $? -ne 0 ]; then
-    echo "Error: girder-server not found on the executable path"
-    exit 1
-fi
-
-# Make sure extra data files were installed correctly
-ls "${virtualenv_dir}"/lib/python*/site-packages/girder/mail_templates/_header.mako
-if [ $? -ne 0 ]; then
-    echo "Error: mail templates were not installed"
+    echo "Error: girder not found on the executable path"
     exit 1
 fi
 
@@ -46,7 +39,7 @@ fi
 
 # Start the server
 export GIRDER_PORT=31200
-python -m girder &> /dev/null &
+girder serve &> /dev/null &
 
 girder_pid=$!
 sleep 1
@@ -60,7 +53,7 @@ echo "Detected api version ${version}"
 
 # Connect to the REST API and request the version
 timeout=0
-until [ $timeout -eq 5 ]; do
+until [ $timeout -eq 30 ]; do
     json=$("${CURL}" --connect-timeout 5 --max-time 5 --silent http://localhost:${GIRDER_PORT}/api/v1/system/version)
     if [ -n "$json" ] && [[ $json == *shortSHA* ]]; then
         break
@@ -87,11 +80,12 @@ fi
 
 # Use the already downloaded fontello archive.
 export GIRDER_LOCAL_FONTELLO_ARCHIVE=${PROJECT_SOURCE_DIR}/clients/web/static/built/fontello.zip
+webroot=$(girder-install web-root)
+
 # Build the web client code
 girder-install web || exit 1
 
 # Make sure that our grunt targets got built
-webroot=$(girder-install web-root)
 if [ ! -f "${webroot}/static/built/girder_app.min.js" ] ; then
     echo "Error: Grunt targets were not built correctly"
     exit 1
@@ -103,7 +97,7 @@ fi
 
 # Start Girder server
 export GIRDER_PORT=50202
-python -m girder &> /dev/null &
+girder serve &> /dev/null &
 
 # Ensure the server started
 girder_pid=$!

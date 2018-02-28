@@ -1,10 +1,11 @@
+girderTest.startApp();
+
 /**
  * As of v1.9.9, phantomJS does not correctly support sending Blobs in XHRs,
  * and the FormData API is extremely limited (i.e. does not support anything
  * other than "append"). We fake the chunk request to get around this by
  * wrapping XHR.prototype.send.
  */
-/* globals girderTest, describe, it, runs, expect, waitsFor, spyOn */
 
 /* used for adjusting minimum upload size */
 var minUploadSize;
@@ -19,8 +20,8 @@ function _setMinimumChunkSize(minSize) {
     if (!minUploadSize) {
         minUploadSize = {UPLOAD_CHUNK_SIZE: girder.rest.getUploadChunkSize()};
         var resp = girder.rest.restRequest({
-            path: 'system/setting',
-            type: 'GET',
+            url: 'system/setting',
+            method: 'GET',
             data: {key: 'core.upload_minimum_chunk_size'},
             async: false
         });
@@ -35,35 +36,26 @@ function _setMinimumChunkSize(minSize) {
     }
     girder.rest.setUploadChunkSize(uploadChunkSize);
     girder.rest.restRequest({
-        path: 'system/setting',
-        type: 'PUT',
+        url: 'system/setting',
+        method: 'PUT',
         data: {key: 'core.upload_minimum_chunk_size', value: settingSize},
         async: false
     });
 }
 
-/**
- * Intercept window.location.assign calls so we can test the behavior of,
- * e.g. download directives that occur from js.
- */
-(function () {
-    window.location.assign = function (url) {
-        girderTest._redirect = url;
-    };
-}(window.location.assign));
-
-/**
- * Start the girder backbone app.
- */
-girderTest.startApp();
-
 describe('Create a data hierarchy', function () {
+    beforeEach(function () {
+        // Intercept window.location.assign calls so we can test the behavior of e.g. download
+        // directives that occur from js.
+        spyOn(window.location, 'assign');
+    });
+
     it('register a user',
         girderTest.createUser('johndoe',
-                              'john.doe@email.com',
-                              'John',
-                              'Doe',
-                              'password!'));
+            'john.doe@email.com',
+            'John',
+            'Doe',
+            'password!'));
 
     it('create a folder', function () {
         runs(function () {
@@ -185,17 +177,17 @@ describe('Create a data hierarchy', function () {
         }, 'the item page to display the file list');
 
         runs(function () {
-            girderTest._redirect = null;
+            window.location.assign.reset();
             window.location.assign($('a.g-file-list-link').attr('href'));
         });
 
         waitsFor(function () {
-            return girderTest._redirect !== null;
+            return window.location.assign.wasCalled;
         }, 'redirect to the file download URL');
 
         runs(function () {
-            expect(/^http:\/\/localhost:.*\/api\/v1\/file\/.+\/download$/.test(
-                girderTest._redirect)).toBe(true);
+            expect(window.location.assign)
+                .toHaveBeenCalledWith(/^http:\/\/localhost:.*\/api\/v1\/file\/.+\/download$/);
         });
     });
 
@@ -227,12 +219,11 @@ describe('Create a data hierarchy', function () {
 
         runs(function () {
             var results = $('.g-quick-search-container li.g-search-result');
-            expect(results.length).toBe(2);
+            expect(results.length).toBe(3);
+            expect(results.find('a[data-resource-type="folder"]').length).toBe(1);
+            expect(results.find('a[data-resource-type="user"]').length).toBe(1);
 
-            expect(results.find('a[resourcetype="folder"]').length).toBe(1);
-            expect(results.find('a[resourcetype="user"]').length).toBe(1);
-
-            results.find('a[resourcetype="user"]').click();
+            results.find('a[data-resource-type="user"]').click();
 
             expect(Backbone.history.fragment).toBe(
                 'user/' + girder.auth.getCurrentUser().get('_id'));
@@ -259,7 +250,6 @@ describe('Create a data hierarchy', function () {
             sendKeyDown(38, '.g-quick-search-container input.g-search-field');
             sendKeyDown(38, '.g-quick-search-container input.g-search-field');
             sendKeyDown(38, '.g-quick-search-container input.g-search-field');
-            sendKeyDown(40, '.g-quick-search-container input.g-search-field');
             sendKeyDown(40, '.g-quick-search-container input.g-search-field');
             sendKeyDown(13, '.g-quick-search-container input.g-search-field');
             expect(Backbone.history.fragment).toBe(
@@ -325,15 +315,15 @@ describe('Create a data hierarchy', function () {
             return $('.g-download-folder:visible').length === 1;
         }, 'the folder down action to appear');
         runs(function () {
-            girderTest._redirect = null;
+            window.location.assign.reset();
             window.location.assign($('a.g-download-folder').attr('href'));
         });
         waitsFor(function () {
-            return girderTest._redirect !== null;
+            return window.location.assign.wasCalled;
         }, 'redirect to the resource download URL');
         runs(function () {
-            expect(/^http:\/\/localhost:.*\/api\/v1\/folder\/.+\/download$/.test(
-                girderTest._redirect)).toBe(true);
+            expect(window.location.assign)
+                .toHaveBeenCalledWith(/^http:\/\/localhost:.*\/api\/v1\/folder\/.+\/download$/);
         });
     });
 
@@ -360,10 +350,10 @@ describe('Create a data hierarchy', function () {
         runs(function () {
             expect(widget.redirectViaForm).toHaveBeenCalled();
             expect(redirect.method).toBe('POST');
-            expect(/^http:\/\/localhost:.*\/api\/v1\/resource\/download.*/.
-                   test(redirect.url)).toBe(true);
-            expect(/{"folder":.*,"item":.*}/.test(redirect.data.resources)).
-                   toBe(true);
+            expect(/^http:\/\/localhost:.*\/api\/v1\/resource\/download.*/
+                .test(redirect.url)).toBe(true);
+            expect(/{"folder":.*,"item":.*}/.test(redirect.data.resources))
+                .toBe(true);
         });
     });
 
@@ -569,7 +559,7 @@ describe('Create a data hierarchy', function () {
         }, 'items to be deleted');
         runs(function () {
             window.callPhantom({action: 'uploadCleanup',
-                                suffix: girderTest._uploadSuffix});
+                suffix: girderTest._uploadSuffix});
         });
     });
 
@@ -578,10 +568,10 @@ describe('Create a data hierarchy', function () {
 
     it('register a second user',
         girderTest.createUser('janedoe',
-                              'jane.doe@email.com',
-                              'Jane',
-                              'Doe',
-                              'password!'));
+            'jane.doe@email.com',
+            'Jane',
+            'Doe',
+            'password!'));
 
     it('test copy permissions', function () {
         // navigate back to John Doe's Public folder
@@ -597,12 +587,12 @@ describe('Create a data hierarchy', function () {
 
         runs(function () {
             var results = $('.g-quick-search-container li.g-search-result');
-            expect(results.length).toBe(2);
+            expect(results.length).toBe(3);
 
-            expect(results.find('a[resourcetype="folder"]').length).toBe(1);
-            expect(results.find('a[resourcetype="user"]').length).toBe(1);
+            expect(results.find('a[data-resource-type="folder"]').length).toBe(1);
+            expect(results.find('a[data-resource-type="user"]').length).toBe(1);
 
-            results.find('a[resourcetype="user"]').click();
+            results.find('a[data-resource-type="user"]').click();
         });
 
         var oldPicked;
@@ -747,6 +737,87 @@ describe('Create a data hierarchy', function () {
         girderTest.testUploadDrop(10, 2);
     });
 
+    it('attempt to upload a directory by dropping', function () {
+        waitsFor(function () {
+            return $('.g-upload-here-button').length > 0;
+        }, 'the upload here button to appear');
+
+        runs(function () {
+            $('.g-upload-here-button').click();
+        });
+
+        waitsFor(function () {
+            return $('.g-drop-zone:visible').length > 0 &&
+                $('.modal-dialog:visible').length > 0;
+        }, 'the upload dialog to appear');
+
+        var files = [
+            {
+                name: 'file1',
+                size: 1024
+            },
+            {
+                name: 'file2',
+                size: 1024
+            },
+            {
+                name: 'dir',
+                size: 4096
+            }
+        ];
+
+        var items = [
+            // Mock DataTransferItem that doesn't support the webkitGetAsEntry
+            // method
+            {
+            },
+            // Mock DataTransferItem that represents a file
+            {
+                webkitGetAsEntry: function () {
+                    return { isFile: true };
+                }
+            },
+            // Mock DataTransferItem that represents a directory
+            {
+                webkitGetAsEntry: function () {
+                    return { isFile: false };
+                }
+            }
+        ];
+
+        var selector = '.g-drop-zone';
+        var dropActiveSelector = '.g-dropzone-show:visible';
+
+        runs(function () {
+            $(selector).trigger($.Event('dragenter', {originalEvent: $.Event('dragenter', {dataTransfer: {}})}));
+        });
+
+        waitsFor(function () {
+            return $(dropActiveSelector).length > 0;
+        }, 'the drop bullseye to appear');
+
+        runs(function () {
+            $(selector).trigger($.Event('drop', {originalEvent: $.Event('drop', {
+                dataTransfer: {
+                    files: files,
+                    items: items
+                }})}));
+        });
+
+        waitsFor(function () {
+            return $(dropActiveSelector).length === 0;
+        }, 'the drop bullseye to disappear');
+
+        waitsFor(function () {
+            return $('.g-upload-error-message').text().length > 0;
+        }, 'the error message to be displayed');
+
+        runs(function () {
+            expect($('.g-upload-error-message').text().indexOf(
+                'Only files may be uploaded') >= 0).toBe(true);
+        });
+    });
+
     it('logout from second user', girderTest.logout('logout from second user'));
 });
 
@@ -754,10 +825,10 @@ describe('Test FileModel static upload functions', function () {
     var folder, item;
 
     it('test prep - register a user', girderTest.createUser('dbowman',
-                                                            'dbowman@nasa.gov',
-                                                            'David',
-                                                            'Bowman',
-                                                            'jupiter'));
+        'dbowman@nasa.gov',
+        'David',
+        'Bowman',
+        'jupiter'));
 
     it('test prep - create top level folder', function () {
         runs(function () {
@@ -816,8 +887,8 @@ describe('Test FileModel static upload functions', function () {
             var item;
 
             item = girder.rest.restRequest({
-                path: '/item',
-                type: 'GET',
+                url: '/item',
+                method: 'GET',
                 data: {
                     folderId: folder.get('_id'),
                     text: filename
@@ -828,8 +899,8 @@ describe('Test FileModel static upload functions', function () {
             item = item && item.responseJSON && item.responseJSON[0];
 
             file = girder.rest.restRequest({
-                path: '/item/' + item._id + '/files',
-                type: 'GET',
+                url: '/item/' + item._id + '/files',
+                method: 'GET',
                 async: false
             });
 
@@ -837,8 +908,8 @@ describe('Test FileModel static upload functions', function () {
 
             if (file) {
                 var resp = girder.rest.restRequest({
-                    path: '/file/' + file._id + '/download',
-                    type: 'GET',
+                    url: '/file/' + file._id + '/download',
+                    method: 'GET',
                     dataType: 'text'
                 }).done(function () {
                     text = resp.responseText;
@@ -877,8 +948,8 @@ describe('Test FileModel static upload functions', function () {
 
         runs(function () {
             file = girder.rest.restRequest({
-                path: '/item/' + item.get('_id') + '/files',
-                type: 'GET',
+                url: '/item/' + item.id + '/files',
+                method: 'GET',
                 async: false
             });
 
@@ -886,9 +957,9 @@ describe('Test FileModel static upload functions', function () {
 
             if (file) {
                 var resp = girder.rest.restRequest({
-                    path: '/file/' + file._id + '/download',
-                    type: 'GET',
-                    dataType: 'text',
+                    url: '/file/' + file._id + '/download',
+                    method: 'GET',
+                    dataType: 'text'
                 }).done(function () {
                     text = resp.responseText;
                 });
@@ -903,7 +974,7 @@ describe('Test FileModel static upload functions', function () {
             expect(file._id).toBe(fileModel.id);
             expect(file.name).toBe(filename);
             expect(text).toBe(speech);
-        })
+        });
     });
 
     it('logout from test account', girderTest.logout('logout from test account'));

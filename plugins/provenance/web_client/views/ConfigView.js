@@ -1,5 +1,3 @@
-import _ from 'underscore';
-
 import PluginConfigBreadcrumbWidget from 'girder/views/widgets/PluginConfigBreadcrumbWidget';
 import View from 'girder/views/View';
 import events from 'girder/events';
@@ -15,23 +13,23 @@ var ConfigView = View.extend({
 
             this._saveSettings([{
                 key: 'provenance.resources',
-                value: this.$('#provenance.resources').val().trim()
+                value: this.$('#g-provenance-resources').val().trim()
             }]);
         }
     },
     initialize: function () {
         restRequest({
-            type: 'GET',
-            path: 'system/setting',
+            method: 'GET',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(['provenance.resources'])
             }
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.render();
-            this.$('#provenance.resources').val(
+            this.$('#g-provenance-resources').val(
                 resp['provenance.resources']
             );
-        }, this));
+        });
     },
 
     render: function () {
@@ -50,24 +48,24 @@ var ConfigView = View.extend({
 
     _saveSettings: function (settings) {
         restRequest({
-            type: 'PUT',
-            path: 'system/setting',
+            method: 'PUT',
+            url: 'system/setting',
             data: {
                 list: JSON.stringify(settings)
             },
             error: null
-        }).done(_.bind(function () {
+        }).done(() => {
             events.trigger('g:alert', {
                 icon: 'ok',
                 text: 'Settings saved.',
                 type: 'success',
                 timeout: 4000
             });
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             this.$('#g-provenance-error-message').text(
                 resp.responseJSON.message
             );
-        }, this));
+        });
     }
 });
 

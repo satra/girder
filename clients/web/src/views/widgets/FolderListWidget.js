@@ -15,11 +15,25 @@ import FolderListTemplate from 'girder/templates/widgets/folderList.pug';
 var FolderListWidget = View.extend({
     events: {
         'click a.g-folder-list-link': function (event) {
+            event.preventDefault();
             var cid = $(event.currentTarget).attr('g-folder-cid');
             this.trigger('g:folderClicked', this.collection.get(cid));
         },
         'click a.g-show-more-folders': function () {
             this.collection.fetchNextPage();
+        },
+        'change .g-list-checkbox': function (event) {
+            const target = $(event.currentTarget);
+            const cid = target.attr('g-folder-cid');
+            if (target.prop('checked')) {
+                this.checked.push(cid);
+            } else {
+                const idx = this.checked.indexOf(cid);
+                if (idx !== -1) {
+                    this.checked.splice(idx, 1);
+                }
+            }
+            this.trigger('g:checkboxesChanged');
         }
     },
 
@@ -34,6 +48,8 @@ var FolderListWidget = View.extend({
 
         this.collection = new FolderCollection();
         this.collection.append = true; // Append, don't replace pages
+        this.collection.filterFunc = settings.folderFilter;
+
         this.collection.on('g:changed', function () {
             this.render();
             this.trigger('g:changed');
@@ -50,20 +66,6 @@ var FolderListWidget = View.extend({
             hasMore: this.collection.hasNextPage(),
             checkboxes: this._checkboxes
         }));
-
-        var view = this;
-        this.$('.g-list-checkbox').change(function () {
-            var cid = $(this).attr('g-folder-cid');
-            if (this.checked) {
-                view.checked.push(cid);
-            } else {
-                var idx = view.checked.indexOf(cid);
-                if (idx !== -1) {
-                    view.checked.splice(idx, 1);
-                }
-            }
-            view.trigger('g:checkboxesChanged');
-        });
         return this;
     },
 
@@ -102,4 +104,3 @@ var FolderListWidget = View.extend({
 });
 
 export default FolderListWidget;
-

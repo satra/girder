@@ -16,13 +16,19 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 ###############################################################################
+import json
 
 from .. import base
 
 from girder.api.v1 import resource
 from girder.constants import AccessType
 from girder.models.model_base import AccessControlledModel
+from girder.models.assetstore import Assetstore
+from girder.models.collection import Collection
+from girder.models.item import Item
+from girder.models.user import User
 from girder.utility.acl_mixin import AccessControlMixin
+from girder.utility import search
 
 
 def setUpModule():
@@ -39,76 +45,15 @@ class SearchTestCase(base.TestCase):
         """
         Test resource/search endpoint
         """
-        # Create a bunch of searchable documents
-        admin = {
-            'email': 'admin@email.com',
-            'login': 'adminlogin',
-            'firstName': 'Admin',
-            'lastName': 'Last',
-            'password': 'adminpassword',
-            'admin': True
-        }
-        admin = self.model('user').createUser(**admin)
+        # get expected models from the database
+        admin = User().findOne({'login': 'adminlogin'})
+        user = User().findOne({'login': 'goodlogin'})
+        coll1 = Collection().findOne({'name': 'Test Collection'})
+        coll2 = Collection().findOne({'name': 'Magic collection'})
+        item1 = Item().findOne({'name': 'Public object'})
 
-        user = {
-            'email': 'good@email.com',
-            'login': 'goodlogin',
-            'firstName': 'First',
-            'lastName': 'Last',
-            'password': 'goodpassword',
-            'admin': False
-        }
-        user = self.model('user').createUser(**user)
-
-        coll1 = {
-            'name': 'Test Collection',
-            'description': 'magic words. And more magic.',
-            'public': True,
-            'creator': admin
-        }
-        coll1 = self.model('collection').createCollection(**coll1)
-
-        coll2 = {
-            'name': 'Magic collection',
-            'description': 'private',
-            'public': False,
-            'creator': admin
-        }
-        coll2 = self.model('collection').createCollection(**coll2)
-        self.model('collection').setUserAccess(
-            coll2, user, level=AccessType.READ, save=True)
-
-        folder1 = {
-            'parent': coll1,
-            'parentType': 'collection',
-            'name': 'Public test folder'
-        }
-        folder1 = self.model('folder').createFolder(**folder1)
-        self.model('folder').setUserAccess(
-            folder1, user, level=AccessType.READ, save=True)
-
-        folder2 = {
-            'parent': coll2,
-            'parentType': 'collection',
-            'name': 'Private test folder'
-        }
-        folder2 = self.model('folder').createFolder(**folder2)
-        self.model('folder').setUserAccess(
-            folder2, user, level=AccessType.NONE, save=True)
-
-        item1 = {
-            'name': 'Public object',
-            'creator': admin,
-            'folder': folder1
-        }
-        item1 = self.model('item').createItem(**item1)
-
-        item2 = {
-            'name': 'Secret object',
-            'creator': admin,
-            'folder': folder2
-        }
-        self.model('item').createItem(**item2)
+        # set user read permissions on the private collection
+        Collection().setUserAccess(coll2, user, level=AccessType.READ, save=True)
 
         # Grab the default user folders
         resp = self.request(
@@ -121,8 +66,7 @@ class SearchTestCase(base.TestCase):
         privateFolder = resp.json[0]
 
         # First test all of the required parameters.
-        self.ensureRequiredParams(
-            path='/resource/search', required=['q', 'types'])
+        self.ensureRequiredParams(path='/resource/search', required=['q', 'types'])
 
         # Now test parameter validation
         resp = self.request(path='/resource/search', params={
@@ -130,14 +74,14 @@ class SearchTestCase(base.TestCase):
             'types': ',,invalid;json!'
         })
         self.assertStatus(resp, 400)
-        self.assertEqual('The types parameter must be JSON.',
-                         resp.json['message'])
+        self.assertEqual('Parameter types must be valid JSON.', resp.json['message'])
 
         # Test searching with no results
         resp = self.request(path='/resource/search', params={
             'q': 'gibberish',
             'types': '["folder", "user", "collection", "group"]'
         })
+        self.assertStatusOk(resp)
         self.assertEqual(resp.json, {
             'folder': [],
             'user': [],
@@ -150,6 +94,7 @@ class SearchTestCase(base.TestCase):
             'q': 'private',
             'types': '["folder", "user", "collection"]'
         })
+        self.assertStatusOk(resp)
         self.assertEqual(resp.json, {
             'folder': [],
             'user': [],
@@ -161,6 +106,7 @@ class SearchTestCase(base.TestCase):
             'mode': 'prefix',
             'types': '["folder", "user", "collection"]'
         })
+        self.assertStatusOk(resp)
         self.assertEqual(resp.json, {
             'folder': [],
             'user': [],
@@ -171,6 +117,7 @@ class SearchTestCase(base.TestCase):
             'q': 'private',
             'types': '["folder", "user", "collection"]'
         }, user=user)
+        self.assertStatusOk(resp)
         self.assertEqual(1, len(resp.json['folder']))
         self.assertDictContainsSubset({
             '_id': str(privateFolder['_id']),
@@ -188,6 +135,7 @@ class SearchTestCase(base.TestCase):
             'mode': 'prefix',
             'types': '["folder", "user", "collection", "item"]'
         }, user=user)
+        self.assertStatusOk(resp)
         self.assertEqual(1, len(resp.json['folder']))
         self.assertDictContainsSubset({
             '_id': str(privateFolder['_id']),
@@ -203,6 +151,7 @@ class SearchTestCase(base.TestCase):
             'q': 'magic',
             'types': '["collection"]'
         }, user=admin)
+        self.assertStatusOk(resp)
         self.assertEqual(2, len(resp.json['collection']))
         self.assertDictContainsSubset({
             '_id': str(coll2['_id']),
@@ -220,6 +169,7 @@ class SearchTestCase(base.TestCase):
             'q': 'goodlogin',
             'types': '["user"]'
         }, user=admin)
+        self.assertStatusOk(resp)
         self.assertEqual(1, len(resp.json['user']))
         self.assertDictContainsSubset({
             '_id': str(user['_id']),
@@ -233,6 +183,7 @@ class SearchTestCase(base.TestCase):
             'q': 'object',
             'types': '["item"]'
         }, user=user)
+        self.assertStatusOk(resp)
         self.assertEqual(1, len(resp.json['item']))
         self.assertDictContainsSubset({
             '_id': str(item1['_id']),
@@ -240,14 +191,44 @@ class SearchTestCase(base.TestCase):
         }, resp.json['item'][0])
 
         # Check search for model that is not access controlled
-        self.assertNotIsInstance(
-            self.model('assetstore'), AccessControlledModel)
-        self.assertNotIsInstance(
-            self.model('assetstore'), AccessControlMixin)
+        self.assertNotIsInstance(Assetstore(), AccessControlledModel)
+        self.assertNotIsInstance(Assetstore(), AccessControlMixin)
         resource.allowedSearchTypes.add('assetstore')
         resp = self.request(path='/resource/search', params={
             'q': 'Test',
             'mode': 'prefix',
             'types': '["assetstore"]'
         }, user=user)
+        self.assertStatusOk(resp)
         self.assertEqual(1, len(resp.json['assetstore']))
+
+    def testSearchModeRegistry(self):
+        def testSearchHandler(query, types, user, level, limit, offset):
+            return {
+                'query': query,
+                'types': types
+            }
+
+        search.addSearchMode('testSearch', testSearchHandler)
+
+        # Use the new search mode.
+        resp = self.request(path='/resource/search', params={
+            'q': 'Test',
+            'mode': 'testSearch',
+            'types': json.dumps(["collection"])
+        })
+        self.assertStatusOk(resp)
+        self.assertDictEqual(resp.json, {
+            'query': 'Test',
+            'types': ["collection"]
+        })
+
+        search.removeSearchMode('testSearch')
+
+        # Use the deleted search mode.
+        resp = self.request(path='/resource/search', params={
+            'q': 'Test',
+            'mode': 'testSearch',
+            'types': json.dumps(["collection"])
+        })
+        self.assertStatus(resp, 400)

@@ -23,7 +23,6 @@ import 'girder/stylesheets/body/groupPage.styl';
 
 import 'bootstrap/js/dropdown';
 import 'bootstrap/js/tab';
-import 'bootstrap/js/tooltip';
 
 /**
  * This view shows a single group's page.
@@ -83,13 +82,12 @@ var GroupView = View.extend({
     },
 
     deleteGroup: function () {
-        var view = this;
         confirm({
             text: 'Are you sure you want to delete the group <b>' +
-                view.model.escape('name') + '</b>?',
+                this.model.escape('name') + '</b>?',
             escapedHtml: true,
-            confirmCallback: function () {
-                view.model.on('g:deleted', function () {
+            confirmCallback: () => {
+                this.model.on('g:deleted', function () {
                     router.navigate('groups', {trigger: true});
                 }).destroy();
             }
@@ -165,27 +163,13 @@ var GroupView = View.extend({
             this.invitees = new UserCollection();
             this.invitees.altUrl =
                 'group/' + this.model.get('_id') + '/invitation';
-            var view = this;
-            this.invitees.on('g:changed', function () {
+            this.invitees.on('g:changed', () => {
                 this._renderInvitesWidget();
-                view.updatePendingStatus();
+                this.updatePendingStatus();
             }, this).fetch();
         }
 
         this._updateRolesLists();
-
-        this.$('.g-group-actions-button,a[title]').tooltip({
-            container: this.$el,
-            placement: 'left',
-            animation: false,
-            delay: {show: 100}
-        });
-        this.$('.g-group-list-header[title]').tooltip({
-            container: this.$el,
-            placement: 'top',
-            animation: false,
-            delay: {show: 100}
-        });
 
         router.navigate('group/' + this.model.get('_id') + '/' +
                                this.tab, {replace: true});
@@ -197,18 +181,17 @@ var GroupView = View.extend({
             this.edit = false;
         }
 
-        _.each($('.g-group-tabs>li>a'), function (el) {
+        _.each($('.g-group-tabs>li>a'), (el) => {
             var tabLink = $(el);
-            var view = this;
-            tabLink.tab().on('shown.bs.tab', function (e) {
-                view.tab = $(e.currentTarget).attr('name');
-                router.navigate('group/' + view.model.get('_id') + '/' + view.tab);
+            tabLink.tab().on('shown.bs.tab', (e) => {
+                this.tab = $(e.currentTarget).attr('name');
+                router.navigate('group/' + this.model.get('_id') + '/' + this.tab);
             });
 
             if (tabLink.attr('name') === this.tab) {
                 tabLink.tab('show');
             }
-        }, this);
+        });
 
         return this;
     },
@@ -236,12 +219,11 @@ var GroupView = View.extend({
     },
 
     leaveGroup: function () {
-        var view = this;
         confirm({
             text: 'Are you sure you want to leave this group?',
-            confirmCallback: function () {
-                view.model.off('g:removed').on('g:removed', function () {
-                    view.render();
+            confirmCallback: () => {
+                this.model.off('g:removed').on('g:removed', () => {
+                    this.render();
                 }).removeMember(getCurrentUser().get('_id'));
             }
         });
@@ -266,13 +248,13 @@ var GroupView = View.extend({
     acceptMembershipRequest: function (e) {
         var userId = $(e.currentTarget).parents('li').attr('userid');
         this.model.off('g:invited').on('g:invited', this.render, this)
-                  .sendInvitation(userId, AccessType.READ, true);
+            .sendInvitation(userId, AccessType.READ, true);
     },
 
     denyMembershipRequest: function (e) {
         var userId = $(e.currentTarget).parents('li').attr('userid');
         this.model.off('g:removed').on('g:removed', this.render, this)
-                  .removeMember(userId);
+            .removeMember(userId);
     },
 
     _updateRolesLists: function () {
@@ -294,10 +276,10 @@ var GroupView = View.extend({
             parentView: this
         }).off().on('g:demoteUser', function (userId) {
             this.model.off('g:demoted').on('g:demoted', this.render, this)
-                      .demoteUser(userId, AccessType.ADMIN);
+                .demoteUser(userId, AccessType.ADMIN);
         }, this).on('g:removeMember', this.removeMember, this)
-                .on('g:moderatorAdded', this.render, this)
-                .render();
+            .on('g:moderatorAdded', this.render, this)
+            .render();
 
         this.modsWidget = new GroupModsWidget({
             el: this.$('.g-group-mods-container'),
@@ -306,10 +288,10 @@ var GroupView = View.extend({
             parentView: this
         }).on('g:demoteUser', function (userId) {
             this.model.off('g:demoted').on('g:demoted', this.render, this)
-                      .demoteUser(userId, AccessType.WRITE);
+                .demoteUser(userId, AccessType.WRITE);
         }, this).on('g:removeMember', this.removeMember, this)
-                .on('g:adminAdded', this.render, this)
-                .render();
+            .on('g:adminAdded', this.render, this)
+            .render();
 
         this.membersWidget = new GroupMembersWidget({
             el: this.$('.g-group-members-container'),
@@ -327,12 +309,14 @@ var GroupView = View.extend({
                     this.model.fetchAccess();
                 }
             }, this).off('g:error').on('g:error', function (err) {
-                // TODO don't alert, show something useful
-                alert(err.responseJSON.message);
+                events.trigger('g:alert', {
+                    text: err.responseJSON.message,
+                    type: 'warning'
+                });
             }, this).sendInvitation(params.user.id, params.level, false, opts);
         }, this).on('g:removeMember', this.removeMember, this)
-                .on('g:moderatorAdded', this.render, this)
-                .on('g:adminAdded', this.render, this);
+            .on('g:moderatorAdded', this.render, this)
+            .on('g:adminAdded', this.render, this);
     }
 }, {
     /**

@@ -11,7 +11,7 @@ a single, stable, consistent web API, it is possible to write multiple
 interchangeable clients using different technologies.
 
 When a Girder instance is deployed, it typically also serves a page
-that uses `Swagger <https://helloreverb.com/developers/swagger>`_ to document
+that uses `Swagger <https://swagger.io>`_ to document
 all available RESTful endpoints in the web API and also provide an easy way
 for users to execute those endpoints with parameters of their choosing. In
 this way, the Swagger page is just the simplest and lightest client application
@@ -30,32 +30,32 @@ of the resource documents is also done in the model layer, and is invoked
 each time a document is about to be saved.
 
 Typically, there is a model class for each resource type in the system. These
-models are loaded as singletons for efficiency, and can be accessed in
-REST resources or other models by invoking ``self.model('foo')``, where ``foo``
-is the name of the model.  For example: ::
+models are loaded as singletons for efficiency, but you should use them like
+normal objects. For example, to use the ``list`` method of the Group model:
 
-    groups = self.model('group').list(user=self.getCurrentUser())
+.. code-block:: python
+
+    from girder.models.group import Group
+    groups = Group().list(user=self.getCurrentUser())
 
 All models that require the standard access control semantics should extend the
-`AccessControlledModel` class. Otherwise, they
-should extend the `Model` class.
+`AccessControlledModel` class. Otherwise, they should extend the `Model` class.
 
 All model classes must have an ``initialize`` method in which they declare
 the name of their corresponding Mongo collection, as well as any collection
-indices they require. For example: ::
+indexes they require. For example, to make a model whose documents live in a
+collection called ``cat_collection`` and ensure that the ``name`` key is indexed
+on that collection, you would use the following ``initialize`` method:
+
+.. code-block:: python
 
     from girder.models.model_base import Model
 
     class Cat(Model):
         def initialize(self):
             self.name = 'cat_collection'
+            self.ensureIndex('name')
 
-The above model singleton could then be accessed via: ::
-
-    self.model('cat')
-
-If you wish to use models in something other than a REST Resource or Model,
-either mixin or instantiate the `ModelImporter` class.
 
 Model Helper Functions
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -65,6 +65,9 @@ Model Helper Functions
 Model Base
 ^^^^^^^^^^
 .. automodule:: girder.models.model_base
+   :members:
+
+.. automodule:: girder.models.api_key
    :members:
 
 User
@@ -179,6 +182,13 @@ Folder
 
 Utility
 -------
+
+.. automodule:: girder.utility.assetstore_utilities
+   :members:
+
+.. automodule:: girder.utility.abstract_assetstore_adapter
+   :members:
+
 .. automodule:: girder.utility.model_importer
    :members:
 
@@ -197,6 +207,9 @@ Utility
 .. automodule:: girder.utility.path
    :members:
 
+.. automodule:: girder.utility.setting_utilities
+   :members:
+
 Constants
 ---------
 .. automodule:: girder.constants
@@ -204,6 +217,17 @@ Constants
 
 Clients
 -------
+
+Python Client
+^^^^^^^^^^^^^
+
+See :ref:`python-client`
+
+Web client
+^^^^^^^^^^
+
+Documentation for Girder's web client library is built and hosted by esdoc and can be found
+`here <https://doc.esdoc.org/github.com/girder/girder>`_.
 
 jQuery Plugins
 ^^^^^^^^^^^^^^

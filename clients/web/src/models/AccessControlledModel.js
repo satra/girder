@@ -1,3 +1,4 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
 import Model from 'girder/models/Model';
@@ -20,23 +21,22 @@ var AccessControlledModel = Model.extend({
      */
     updateAccess: function (params) {
         if (this.altUrl === null && this.resourceName === null) {
-            alert('Error: You must set an altUrl or a resourceName on your model.');
-            return;
+            throw new Error('An altUrl or resourceName must be set on the Model.');
         }
 
         return restRequest({
-            path: (this.altUrl || this.resourceName) + '/' + this.get('_id') + '/access',
-            type: 'PUT',
+            url: `${this.altUrl || this.resourceName}/${this.id}/access`,
+            method: 'PUT',
             data: _.extend({
                 access: JSON.stringify(this.get('access')),
                 public: this.get('public'),
                 publicFlags: JSON.stringify(this.get('publicFlags') || [])
             }, params || {})
-        }).done(_.bind(function () {
+        }).done(() => {
             this.trigger('g:accessListSaved');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
     },
 
     /**
@@ -48,15 +48,14 @@ var AccessControlledModel = Model.extend({
      */
     fetchAccess: function (force) {
         if (this.altUrl === null && this.resourceName === null) {
-            alert('Error: You must set an altUrl or a resourceName on your model.');
-            return;
+            throw new Error('An altUrl or resourceName must be set on the Model.');
         }
 
         if (!this.get('access') || force) {
             return restRequest({
-                path: (this.altUrl || this.resourceName) + '/' + this.get('_id') + '/access',
-                type: 'GET'
-            }).done(_.bind(function (resp) {
+                url: `${this.altUrl || this.resourceName}/${this.id}/access`,
+                method: 'GET'
+            }).done((resp) => {
                 if (resp.access) {
                     this.set(resp);
                 } else {
@@ -64,12 +63,12 @@ var AccessControlledModel = Model.extend({
                 }
                 this.trigger('g:accessFetched');
                 return resp;
-            }, this)).error(_.bind(function (err) {
+            }).fail((err) => {
                 this.trigger('g:error', err);
-            }, this));
+            });
         } else {
             this.trigger('g:accessFetched');
-            return $.when(this.get('access'));
+            return $.Deferred().resolve(this.get('access')).promise();
         }
     }
 });

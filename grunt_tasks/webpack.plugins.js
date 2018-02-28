@@ -1,29 +1,29 @@
 /**
  * This file contains custom webpack plugins.
  */
+'use strict';
 
-var _ = require('underscore');
-var webpack = require('webpack');
-
-/**
- * We wrap the normal DllReferencePlugin to be able to accept a path to a manifest file
- * rather than its contents. This is because at grunt config time, the manifest
- * file may not exist yet, so we need to defer reading the file until task runtime.
- */
-var DllReferenceByPathPlugin = function (options) {
-    // called at config time
-    webpack.DllReferencePlugin.call(this, options);
-};
-
-DllReferenceByPathPlugin.prototype.apply = function (compiler) {
-    // called at runtime
-    if (_.isString(this.options.manifest)) {
-        this.options.manifest = require(this.options.manifest);
+// This plugin modifies the generated webpack code to execute a module within the DLL bundle
+// in addition to preserving the default behavior of exporting the webpack require function
+class DllBootstrapPlugin {
+    constructor(options) {
+        this.options = options || {};
     }
 
-    webpack.DllReferencePlugin.prototype.apply.call(this, compiler);
-};
+    apply(compiler) {
+        compiler.plugin('compilation', (compilation) => {
+            compilation.mainTemplate.plugin('startup', (source, chunk) => {
+                const bootstrapEntry = this.options[chunk.name];
+                if (bootstrapEntry) {
+                    const module = chunk.modules.find((m) => m.rawRequest === bootstrapEntry);
+                    source = `__webpack_require__(${module.id});\n${source}`;
+                }
+                return source;
+            });
+        });
+    }
+}
 
 module.exports = {
-    DllReferenceByPathPlugin
+    DllBootstrapPlugin
 };

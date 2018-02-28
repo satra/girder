@@ -20,15 +20,15 @@ var AssetstoreModel = Model.extend({
 
     import: function (params) {
         return restRequest({
-            path: 'assetstore/' + this.get('_id') + '/import',
-            type: 'POST',
+            url: `assetstore/${this.id}/import`,
+            method: 'POST',
             data: params,
             error: null
-        }).done(_.bind(function (resp) {
+        }).done((resp) => {
             this.trigger('g:imported', resp);
-        }, this)).error(_.bind(function (resp) {
+        }).fail((resp) => {
             this.trigger('g:error', resp);
-        }, this));
+        });
     },
 
     save: function () {

@@ -18,6 +18,7 @@
 ###############################################################################
 
 import mock
+import sys
 import os
 import six
 import shutil
@@ -25,15 +26,18 @@ import tempfile
 
 from .. import base
 from girder import constants
+from girder.models.user import User
 from girder.utility import install
 
-pluginRoot = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'test_plugins')
+pluginRoot = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'test', 'test_plugins'
+))
 
 
 class PluginOpts():
     def __init__(self, plugin=None, force=False, symlink=False, dev=False, npm='npm',
                  skip_requirements=False, all_plugins=False, plugins=None, watch=False,
-                 watch_plugin=None):
+                 watch_plugin=None, plugin_prefix='plugin', no_plugins=False):
         self.plugin = plugin
         self.force = force
         self.symlink = symlink
@@ -44,6 +48,8 @@ class PluginOpts():
         self.plugins = plugins
         self.watch = watch
         self.watch_plugin = watch_plugin
+        self.plugin_prefix = plugin_prefix
+        self.no_plugins = no_plugins
 
 
 class ProcMock(object):
@@ -114,7 +120,7 @@ class InstallTestCase(base.TestCase):
             force=True, skip_requirements=True,
             plugin=[os.path.join(pluginRoot, 'has_deps')]))
 
-        # If bad path is given, should fail gracefuly
+        # If bad path is given, should fail gracefully
         with six.assertRaisesRegex(self, Exception, 'Invalid plugin directory'):
             install.install_plugin(PluginOpts(force=True, plugin=[
                 '/bad/install/path'
@@ -186,7 +192,7 @@ class InstallTestCase(base.TestCase):
             os.path.join(pluginRoot, 'has_grunt_deps')
         ]))
 
-        # If bad path is given, should fail gracefuly
+        # If bad path is given, should fail gracefully
         with six.assertRaisesRegex(self, Exception, 'Invalid plugin directory'):
             install.install_plugin(PluginOpts(force=True, plugin=[
                 '/bad/install/path'
@@ -224,28 +230,8 @@ class InstallTestCase(base.TestCase):
         self.assertFalse(os.path.islink(os.path.join(self.pluginDir, 'has_grunt_deps')))
 
     def testWebInstall(self):
-        with mock.patch('subprocess.Popen', return_value=ProcMock(rc=2)) as p,\
-                six.assertRaisesRegex(self, Exception, 'npm install .* returned 2'):
-            install.install_web()
-
-            self.assertEqual(len(p.mock_calls), 1)
-            self.assertEqual(p.mock_calls[0][1][0][:2], ('npm', 'install'))
-            self.assertEqual(p.mock_calls[0][2]['cwd'], constants.PACKAGE_DIR)
-
-        with mock.patch('subprocess.Popen', return_value=ProcMock()):
-            install.install_web()
-
-        with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
-            install.install_web()
-            self.assertNotIn('--production', p.mock_calls[0][1][0])
-
-        with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
-            install.install_web(PluginOpts(dev=True))
-
-            self.assertNotIn('--production', p.mock_calls[0][1][0])
-
         # Test initiation of web install via the REST API
-        user = self.model('user').createUser(
+        user = User().createUser(
             login='admin', firstName='admin', lastName='admin', email='a@foo.com',
             password='passwd', admin=True)
 
@@ -256,11 +242,12 @@ class InstallTestCase(base.TestCase):
 
             self.assertEqual(len(p.mock_calls), 2)
             self.assertEqual(
-                list(p.mock_calls[0][1][0]), ['npm', 'install', '--unsafe-perm'])
+                list(p.mock_calls[0][1][0]),
+                ['npm', 'install', '--unsafe-perm', '--no-save', '--production'])
             self.assertEqual(
                 list(p.mock_calls[1][1][0]),
                 ['npm', 'run', 'build', '--',
-                 '--no-progress=true', '--env=prod', '--plugins='])
+                 '--no-progress=true', '--env=prod', '--plugins=', '--configure-plugins='])
 
         # Test with progress (requires actually calling a subprocess)
         os.environ['PATH'] = '%s:%s' % (
@@ -272,22 +259,76 @@ class InstallTestCase(base.TestCase):
         })
         self.assertStatusOk(resp)
 
+    def testWebInstallCli(self):
+        def invokeCli(argList):
+            args = ['girder-install']
+            args += list(argList)
+            with mock.patch.object(sys, 'argv', args):
+                install.main()
+
+        # Test web install
+        with mock.patch('subprocess.Popen', return_value=ProcMock(rc=2)) as p,\
+                six.assertRaisesRegex(self, Exception, 'npm install .* returned 2'):
+            invokeCli(['web'])
+
+            self.assertEqual(len(p.mock_calls), 1)
+            self.assertEqual(p.mock_calls[0][1][0][:2], ('npm', 'install'))
+            self.assertEqual(p.mock_calls[0][2]['cwd'], constants.PACKAGE_DIR)
+
+        with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
+            invokeCli(['web'])
+            self.assertIn('--production', p.mock_calls[0][1][0])
+
+        with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
+            invokeCli(['web', '--dev'])
+            self.assertNotIn('--production', p.mock_calls[0][1][0])
+
         # Test watch commands
         with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
-            install.install_web(PluginOpts(watch=True))
+            invokeCli(['web', '--watch'])
 
             self.assertEqual(len(p.mock_calls), 1)
             self.assertEqual(list(p.mock_calls[0][1][0]), ['npm', 'run', 'watch'])
 
         with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
-            install.install_web(PluginOpts(watch_plugin='jobs'))
+            invokeCli(['web', '--watch-plugin=jobs'])
 
             self.assertEqual(len(p.mock_calls), 1)
             self.assertEqual(
                 list(p.mock_calls[0][1][0]),
-                ['npm', 'run', 'watch', '--', '--all-plugins', 'webpack:plugin_jobs']
+                ['npm', 'run', 'watch', '--', '--plugins=jobs', '--configure-plugins=',
+                 'webpack:plugin_jobs']
             )
 
         # Keyboard interrupt should be handled gracefully
         with mock.patch('subprocess.Popen', return_value=ProcMock(keyboardInterrupt=True)):
-            install.install_web(PluginOpts(watch=True))
+            invokeCli(['web', '--watch'])
+
+        # Test "--plugins=" and --no-plugins
+        with mock.patch('girder.utility.install.Setting') as p,\
+                mock.patch('subprocess.Popen', return_value=ProcMock()):
+            invokeCli(['web', '--no-plugins'])
+            invokeCli(['web', '--plugins='])
+            invokeCli(['web', '--plugins=,'])
+            self.assertEqual(len(p.mock_calls), 0)
+
+    def testStaticDependencies(self):
+        for p in ('does_nothing', 'has_deps', 'has_static_deps', 'has_webroot', 'test_plugin'):
+            install.install_plugin(PluginOpts(plugin=[
+                os.path.join(pluginRoot, p)
+            ]))
+
+        with mock.patch('subprocess.Popen', return_value=ProcMock()) as p:
+            install.install_web(PluginOpts(plugins='has_static_deps'))
+
+            self.assertEqual(len(p.mock_calls), 2)
+            self.assertEqual(list(p.mock_calls[1][1][0][:-1]), [
+                'npm', 'run', 'build', '--', '--no-progress=true', '--env=prod',
+                '--plugins=has_static_deps',
+            ])
+            lastArg = p.mock_calls[1][1][0][-1]
+            six.assertRegex(self, lastArg, '--configure-plugins=.*')
+            self.assertEqual(
+                set(lastArg.split('=')[-1].split(',')), {
+                    'does_nothing', 'has_deps', 'has_webroot', 'test_plugin'
+                })

@@ -22,9 +22,11 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 
 from .. import base
 from girder.api import filter_logging
+from girder.models.user import User
 from girder.utility import config
 
 
@@ -58,14 +60,16 @@ class FilterLoggingTestCase(base.TestCase):
             'lastName': 'Last',
             'password': 'goodpassword'
         }
-        self.admin = self.model('user').createUser(**user)
+        self.admin = User().createUser(**user)
 
-    def _checkLogCount(self, numRequests, numLogged, logFile=None):
+    def _checkLogCount(self, numRequests, numLogged, logFile=None, duration=None):
         resp = self.request(path='/system/log', user=self.admin, params={
             'log': 'info', 'bytes': 1
         }, isJson=False)
         self.assertStatusOk(resp)
         for i in range(numRequests):
+            if isinstance(duration, list) and i < len(duration):
+                time.sleep(duration[i])
             self.request(path='/system/version', method='GET')
             self.assertStatusOk(resp)
         chunkSize = 32768
@@ -85,7 +89,7 @@ class FilterLoggingTestCase(base.TestCase):
                     '/api/v1/system/version')[1:]
                 self.assertEqual(len(logEntries), numLogged)
 
-    def testFilter(self):
+    def testFilterFrequency(self):
         self._checkLogCount(1, 1)
         self._checkLogCount(3, 3)
 
@@ -101,6 +105,23 @@ class FilterLoggingTestCase(base.TestCase):
 
         self.assertTrue(filter_logging.removeLoggingFilter(regex))
         self._checkLogCount(2, 2)
+
+        self.assertFalse(filter_logging.removeLoggingFilter(regex))
+
+    def testFilterDuration(self):
+        self._checkLogCount(1, 1)
+        self._checkLogCount(3, 3)
+
+        regex = 'GET (/[^/ ?#]+)*/system/version[/ ?#]'
+        # log every third version request
+        filter_logging.addLoggingFilter(regex, duration=3)
+        self._checkLogCount(1, 1)
+        self._checkLogCount(3, 1, duration=[0, 0, 3.1])
+        self._checkLogCount(2, 0, duration=[0, 0])
+        self._checkLogCount(1, 1, duration=[3.1])
+
+        self.assertTrue(filter_logging.removeLoggingFilter(regex))
+        self._checkLogCount(2, 2, duration=[0, 0])
 
         self.assertFalse(filter_logging.removeLoggingFilter(regex))
 

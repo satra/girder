@@ -1,8 +1,10 @@
 import _ from 'underscore';
 
-import { fetchCurrentUser } from 'girder/auth';
+import { fetchCurrentUser, setCurrentUser } from 'girder/auth';
+import events from 'girder/events';
 import Model from 'girder/models/Model';
 import { restRequest } from 'girder/rest';
+import eventStream from 'girder/utilities/EventStream';
 
 var UserModel = Model.extend({
     resourceName: 'user',
@@ -21,13 +23,13 @@ var UserModel = Model.extend({
      */
     current: function () {
         fetchCurrentUser()
-            .then(_.bind(function (user) {
+            .done((user) => {
                 if (user) {
                     this.set(user);
                 } else {
                     this.clear();
                 }
-            }, this));
+            });
     },
 
     name: function () {
@@ -88,18 +90,18 @@ var UserModel = Model.extend({
      */
     changePassword: function (oldPassword, newPassword) {
         return restRequest({
-            path: this.resourceName + '/password',
+            url: `${this.resourceName}/password`,
             data: {
                 old: oldPassword,
                 new: newPassword
             },
-            type: 'PUT',
+            method: 'PUT',
             error: null
-        }).done(_.bind(function () {
+        }).done(() => {
             this.trigger('g:passwordChanged');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
     },
 
     /**
@@ -107,19 +109,44 @@ var UserModel = Model.extend({
      */
     adminChangePassword: function (newPassword) {
         return restRequest({
-            path: this.resourceName + '/' + this.id + '/password',
+            url: `${this.resourceName}/${this.id}/password`,
             data: {
                 password: newPassword
             },
-            type: 'PUT',
+            method: 'PUT',
             error: null
-        }).done(_.bind(function () {
+        }).done(() => {
             this.trigger('g:passwordChanged');
-        }, this)).error(_.bind(function (err) {
+        }).fail((err) => {
             this.trigger('g:error', err);
-        }, this));
+        });
+    }
+}, {
+    fromTemporaryToken: function (userId, token) {
+        return restRequest({
+            url: `user/password/temporary/${userId}`,
+            method: 'GET',
+            data: {token: token},
+            error: null
+        }).done((resp) => {
+            resp.user.token = resp.authToken.token;
+            eventStream.close();
+            setCurrentUser(new UserModel(resp.user));
+            eventStream.open();
+            events.trigger('g:login-changed');
+        });
+    },
+
+    sendVerificationEmail: function (login) {
+        return restRequest({
+            url: 'user/verification',
+            method: 'POST',
+            data: {
+                login: login
+            },
+            error: null
+        });
     }
 });
 
 export default UserModel;
-

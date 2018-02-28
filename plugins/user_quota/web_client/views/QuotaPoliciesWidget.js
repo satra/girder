@@ -1,14 +1,14 @@
+import $ from 'jquery';
 import _ from 'underscore';
 
 import View from 'girder/views/View';
 import { formatSize } from 'girder/misc';
 import { getCurrentUser } from 'girder/auth';
 import { handleOpen, handleClose } from 'girder/dialog';
-import { valueAndUnitsToSize, sizeToValueAndUnits } from '../utilities/Conversions';
-
 import 'girder/utilities/jquery/girderEnable';
 import 'girder/utilities/jquery/girderModal';
 
+import { valueAndUnitsToSize, sizeToValueAndUnits } from '../utilities/Conversions';
 import QuotaPoliciesWidgetTemplate from '../templates/quotaPoliciesWidget.pug';
 
 var QuotaPoliciesWidget = View.extend({
@@ -24,22 +24,36 @@ var QuotaPoliciesWidget = View.extend({
                 fallbackAssetstore: this.$('#g-fallbackAssetstore').val()
             };
             fields.fileSizeQuota = valueAndUnitsToSize(
-                this.$('#g-sizeValue').val(), this.$('#g-sizeUnits').val());
+                this.$('#g-user-quota-size-value').val(),
+                this.$('#g-user-quota-size-units').val());
             this.updateQuotaPolicies(fields);
             this.$('button.g-save-policies').girderEnable(false);
             this.$('.g-validation-failed-message').text('');
         },
-        'input #g-sizeValue': '_selectCustomQuota',
-        'change #g-sizeUnits': '_selectCustomQuota'
+        'input #g-user-quota-size-value': '_selectCustomQuota',
+        'change #g-user-quota-size-units': '_selectCustomQuota'
     },
 
     initialize: function (settings) {
         this.model = settings.model;
         this.modelType = settings.modelType;
+        this.plots = [];
         this.model.off('g:quotaPolicyFetched').on('g:quotaPolicyFetched',
             function () {
                 this.render();
             }, this).fetchQuotaPolicy();
+    },
+
+    destroy: function () {
+        this._destroyPlots();
+        View.prototype.destroy.call(this);
+    },
+
+    _destroyPlots: function () {
+        for (let plot of this.plots) {
+            plot.data('jqplot').destroy();
+        }
+        this.plots = [];
     },
 
     _selectCustomQuota: function () {
@@ -66,7 +80,7 @@ var QuotaPoliciesWidget = View.extend({
             ['Used (' + formatSize(used) + ')', used],
             ['Free (' + formatSize(free) + ')', free]
         ];
-        $(el).jqplot([data], {
+        var plot = $(el).jqplot([data], {
             seriesDefaults: {
                 renderer: $.jqplot.PieRenderer,
                 rendererOptions: {
@@ -92,6 +106,7 @@ var QuotaPoliciesWidget = View.extend({
             },
             gridPadding: {top: 10, right: 10, bottom: 10, left: 10}
         });
+        this.plots.push(plot);
     },
 
     capacityString: function () {
@@ -116,50 +131,45 @@ var QuotaPoliciesWidget = View.extend({
     },
 
     render: function () {
-        var view = this;
         var sizeInfo, defaultQuota, defaultQuotaString, modal;
-        var name = view.model.attributes.name;
+        var name = this.model.name();
         var currentUser = getCurrentUser();
-        if (view.modelType === 'user') {
-            name = view.model.attributes.firstName + ' ' +
-                   view.model.attributes.lastName;
-        }
         sizeInfo = sizeToValueAndUnits(
-            view.model.get('quotaPolicy').fileSizeQuota);
+            this.model.get('quotaPolicy').fileSizeQuota);
         defaultQuota = this.model.get('defaultQuota');
         if (!defaultQuota) {
             defaultQuotaString = 'Unlimited';
         } else {
             defaultQuotaString = formatSize(defaultQuota);
         }
+        this._destroyPlots();
         modal = this.$el.html(QuotaPoliciesWidgetTemplate({
             currentUser: currentUser,
-            model: view.model,
-            modelType: view.modelType,
+            model: this.model,
+            modelType: this.modelType,
             name: name,
-            quotaPolicy: view.model.get('quotaPolicy'),
+            quotaPolicy: this.model.get('quotaPolicy'),
             sizeValue: sizeInfo.sizeValue,
             sizeUnits: sizeInfo.sizeUnits,
-            assetstoreList: (currentUser.get('admin')
-                ? view.model.get('assetstoreList').models : undefined),
+            assetstoreList: currentUser.get('admin') ? this.model.get('assetstoreList').models : undefined,
             capacityString: ' ' + this.capacityString(),
             defaultQuotaString: defaultQuotaString
-        })).girderModal(this).on('shown.bs.modal', function () {
-            view.$('#g-fileSizeQuota').focus();
-            view.capacityChart(view, '.g-quota-capacity-chart');
-        }).on('hidden.bs.modal', function () {
+        })).girderModal(this).on('shown.bs.modal', () => {
+            this.$('#g-fileSizeQuota').focus();
+            this.capacityChart(this, '.g-quota-capacity-chart');
+        }).on('hidden.bs.modal', () => {
             handleClose('quota');
+            this.trigger('g:hidden');
         });
         modal.trigger($.Event('ready.girder.modal', {relatedTarget: modal}));
-        view.$('#g-fileSizeQuota').focus();
+        this.$('#g-fileSizeQuota').focus();
         handleOpen('quota');
         return this;
     },
 
     updateQuotaPolicies: function (fields) {
-        var view = this;
-        _.each(fields, function (value, key) {
-            view.model.get('quotaPolicy')[key] = value;
+        _.each(fields, (value, key) => {
+            this.model.get('quotaPolicy')[key] = value;
         });
         this.model.on('g:quotaPolicySaved', function () {
             this.$el.modal('hide');

@@ -19,16 +19,24 @@
 
 import json
 import os
+import requests
 
 from .. import base
+from girder import config
 from girder.api.rest import endpoint
+from girder.models.user import User
 
 
 def setUpModule():
-    base.mockPluginDir(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'test_plugins'))
+    os.environ['GIRDER_PORT'] = os.environ.get('GIRDER_TEST_PORT', '20200')
+    config.loadConfig()
+    testPluginPath = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', '..', 'test', 'test_plugins'
+    ))
+    base.mockPluginDir(testPluginPath)
     base.enabledPlugins = ['test_plugin']
 
-    base.startServer()
+    base.startServer(mock=False)
 
 
 def tearDownModule():
@@ -66,24 +74,25 @@ class TestEndpointDecoratorException(base.TestCase):
         self.assertEqual(obj['type'], 'internal')
 
     def testBoundHandlerDecorator(self):
+        user = User().createUser('tester', 'password', 'Test', 'User', 'test@test.com')
 
-        resp = self.request('/collection/unbound/default/noargs', params={
+        resp = self.request('/collection/unbound/default/noargs', user=user, params={
             'val': False
         })
         self.assertStatusOk(resp)
         self.assertEqual(resp.json, True)
 
-        resp = self.request('/collection/unbound/default', params={
+        resp = self.request('/collection/unbound/default', user=user, params={
             'val': False
         })
         self.assertStatusOk(resp)
         self.assertEqual(resp.json, True)
 
-        resp = self.request('/collection/unbound/explicit')
+        resp = self.request('/collection/unbound/explicit', user=user)
         self.assertStatusOk(resp)
         self.assertEqual(resp.json, {
             'name': 'collection',
-            'user': None
+            'userLogin': 'tester'
         })
 
     def testRawResponse(self):
@@ -94,3 +103,13 @@ class TestEndpointDecoratorException(base.TestCase):
         resp = self.request('/other/rawInternal', isJson=False)
         self.assertStatusOk(resp)
         self.assertEqual(self.getBody(resp), 'this is also a raw response')
+
+        # We must make an actual request in order to test response encoding
+        # at the WSGI server layer.
+        resp = requests.get(
+            'http://127.0.0.1:%s/api/v1/other/rawReturningText' % os.environ['GIRDER_TEST_PORT'])
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers['Content-Type'], 'text/plain;charset=utf-8')
+        self.assertEqual(resp.content, b'this is not encoded \xf0\x9f\x91\x8d')
+        self.assertEqual(resp.text, u'this is not encoded \U0001F44D')
