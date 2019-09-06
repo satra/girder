@@ -1,33 +1,17 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cherrypy
 import mako
 import mimetypes
 import os
-import posixpath
 import six
 
 import girder.events
 from girder import constants, logprint, __version__, logStdoutStderr, _setupCache
 from girder.models.setting import Setting
-from girder.utility import plugin_utilities, config
+from girder import plugin
+from girder.settings import SettingKey
+from girder.utility import config
+from girder.constants import ServerMode
 from . import webroot
 
 with open(os.path.join(os.path.dirname(__file__), 'error.mako')) as f:
@@ -42,59 +26,24 @@ def _errorDefault(status, message, *args, **kwargs):
     return mako.template.Template(_errorTemplate).render(status=status, message=message)
 
 
-def getPlugins():
-    plugins = Setting().get(constants.SettingKey.PLUGINS_ENABLED, default=())
-    return plugin_utilities.getToposortedPlugins(plugins, ignoreMissing=True)
-
-
 def getApiRoot():
     return config.getConfig()['server']['api_root']
 
 
-def getStaticRoot():
-    routeTable = loadRouteTable()
-
-    # If the static route is a URL, leave it alone
-    if '://' in routeTable[constants.GIRDER_STATIC_ROUTE_ID]:
-        return routeTable[constants.GIRDER_STATIC_ROUTE_ID]
-    else:
-        # Make the staticRoot relative to the api_root, if possible.  The api_root
-        # could be relative or absolute, but it needs to be in an absolute form for
-        # relpath to behave as expected.  We always expect the api_root to
-        # contain at least two components, but the reference from static needs to
-        # be from only the first component.
-        return posixpath.relpath(routeTable[constants.GIRDER_STATIC_ROUTE_ID],
-                                 routeTable[constants.GIRDER_ROUTE_ID])
+def getStaticPublicPath():
+    return config.getConfig()['server']['static_public_path']
 
 
-def getApiStaticRoot():
-    routeTable = loadRouteTable()
-
-    # If the static route is a URL, leave it alone
-    if '://' in routeTable[constants.GIRDER_STATIC_ROUTE_ID]:
-        return routeTable[constants.GIRDER_STATIC_ROUTE_ID]
-    else:
-        # Make the staticRoot relative to the api_root, if possible.  The api_root
-        # could be relative or absolute, but it needs to be in an absolute form for
-        # relpath to behave as expected.  We always expect the api_root to
-        # contain at least two components, but the reference from static needs to
-        # be from only the first component.
-        apiRootBase = posixpath.split(posixpath.join('/',
-                                                     config.getConfig()['server']['api_root']))[0]
-        return posixpath.relpath(routeTable[constants.GIRDER_STATIC_ROUTE_ID],
-                                 apiRootBase)
-
-
-def configureServer(test=False, plugins=None, curConfig=None):
+def configureServer(mode=None, plugins=None, curConfig=None):
     """
     Function to setup the cherrypy server. It configures it, but does
     not actually start it.
 
-    :param test: Set to True when running in the tests.
-    :type test: bool
+    :param mode: The server mode to start in.
+    :type mode: string
     :param plugins: If you wish to start the server with a custom set of
         plugins, pass this as a list of plugins to load. Otherwise,
-        will use the PLUGINS_ENABLED setting value from the db.
+        all installed plugins will be loaded.
     :param curConfig: The configuration dictionary to update.
     """
     if curConfig is None:
@@ -103,7 +52,7 @@ def configureServer(test=False, plugins=None, curConfig=None):
     appconf = {
         '/': {
             'request.dispatch': cherrypy.dispatch.MethodDispatcher(),
-            'request.show_tracebacks': test,
+            'request.show_tracebacks': mode == ServerMode.TESTING,
             'request.methods_with_bodies': ('POST', 'PUT', 'PATCH'),
             'response.headers.server': 'Girder %s' % __version__,
             'error_page.default': _errorDefault
@@ -115,43 +64,12 @@ def configureServer(test=False, plugins=None, curConfig=None):
     mimetypes.add_type('application/x-font-ttf', '.ttf')
     mimetypes.add_type('application/font-woff', '.woff')
 
-    if test:
-        appconf['/src'] = {
-            'tools.staticdir.on': True,
-            'tools.staticdir.root': constants.STATIC_ROOT_DIR,
-            'tools.staticdir.dir': 'clients/web/src',
-        }
-        appconf['/test'] = {
-            'tools.staticdir.on': True,
-            'tools.staticdir.root': constants.STATIC_ROOT_DIR,
-            'tools.staticdir.dir': 'clients/web/test',
-        }
-        appconf['/clients'] = {
-            'tools.staticdir.on': True,
-            'tools.staticdir.root': constants.STATIC_ROOT_DIR,
-            'tools.staticdir.dir': 'clients'
-        }
-        appconf['/plugins'] = {
-            'tools.staticdir.on': True,
-            'tools.staticdir.root': constants.STATIC_ROOT_DIR,
-            'tools.staticdir.dir': 'plugins',
-        }
-
     curConfig.update(appconf)
+    if mode:
+        curConfig['server']['mode'] = mode
 
-    if test:
-        # Force some config params in testing mode
-        curConfig.update({'server': {
-            'mode': 'testing',
-            'api_root': 'api/v1',
-            'static_root': 'static',
-            'api_static_root': '../static',
-            'cherrypy_server': True
-        }})
-
-    mode = curConfig['server']['mode'].lower()
-    logprint.info('Running in mode: ' + mode)
-    cherrypy.config['engine.autoreload.on'] = mode == 'development'
+    logprint.info('Running in mode: ' + curConfig['server']['mode'])
+    cherrypy.config['engine.autoreload.on'] = mode == ServerMode.DEVELOPMENT
 
     _setupCache()
 
@@ -162,16 +80,20 @@ def configureServer(test=False, plugins=None, curConfig=None):
     root = webroot.Webroot()
     api_main.addApiToNode(root)
 
+    girder.events.setupDaemon()
     cherrypy.engine.subscribe('start', girder.events.daemon.start)
     cherrypy.engine.subscribe('stop', girder.events.daemon.stop)
 
-    if plugins is None:
-        plugins = getPlugins()
-    else:
-        plugins = plugin_utilities.getToposortedPlugins(plugins, ignoreMissing=True)
+    routeTable = loadRouteTable()
+    info = {
+        'config': appconf,
+        'serverRoot': root,
+        'serverRootPath': routeTable[constants.GIRDER_ROUTE_ID],
+        'apiRoot': root.api.v1,
+    }
 
-    root, appconf, _ = plugin_utilities.loadPlugins(
-        plugins, root, appconf, root.api.v1, buildDag=False)
+    plugin._loadPlugins(info, plugins)
+    root, appconf = info['serverRoot'], info['config']
 
     return root, appconf
 
@@ -187,11 +109,16 @@ def loadRouteTable(reconcileRoutes=False):
     :returns: The non empty routes (as a dict of name -> route) to be mounted by CherryPy
               during Girder's setup phase.
     """
-    pluginWebroots = plugin_utilities.getPluginWebroots()
-    routeTable = Setting().get(constants.SettingKey.ROUTE_TABLE)
+    pluginWebroots = plugin.getPluginWebroots()
+    routeTable = Setting().get(SettingKey.ROUTE_TABLE)
 
     def reconcileRouteTable(routeTable):
         hasChanged = False
+
+        # Migration for the removed static root setting
+        if 'core_static_root' in routeTable:
+            del routeTable['core_static_root']
+            hasChanged = True
 
         for name in pluginWebroots.keys():
             if name not in routeTable:
@@ -199,7 +126,7 @@ def loadRouteTable(reconcileRoutes=False):
                 hasChanged = True
 
         if hasChanged:
-            Setting().set(constants.SettingKey.ROUTE_TABLE, routeTable)
+            Setting().set(SettingKey.ROUTE_TABLE, routeTable)
 
         return routeTable
 
@@ -209,21 +136,22 @@ def loadRouteTable(reconcileRoutes=False):
     return {name: route for (name, route) in six.viewitems(routeTable) if route}
 
 
-def setup(test=False, plugins=None, curConfig=None):
+def setup(mode=None, plugins=None, curConfig=None):
     """
     Configure and mount the Girder server and plugins under the
     appropriate routes.
 
     See ROUTE_TABLE setting.
 
-    :param test: Whether to start in test mode.
+    :param mode: The server mode to start in.
+    :type mode: string
     :param plugins: List of plugins to enable.
     :param curConfig: The config object to update.
     """
     logStdoutStderr()
 
-    pluginWebroots = plugin_utilities.getPluginWebroots()
-    girderWebroot, appconf = configureServer(test, plugins, curConfig)
+    pluginWebroots = plugin.getPluginWebroots()
+    girderWebroot, appconf = configureServer(mode, plugins, curConfig)
     routeTable = loadRouteTable(reconcileRoutes=True)
 
     # Mount Girder
@@ -231,11 +159,10 @@ def setup(test=False, plugins=None, curConfig=None):
         girderWebroot, str(routeTable[constants.GIRDER_ROUTE_ID]), appconf)
 
     # Mount static files
-    cherrypy.tree.mount(None, routeTable[constants.GIRDER_STATIC_ROUTE_ID],
+    cherrypy.tree.mount(None, '/static',
                         {'/':
                          {'tools.staticdir.on': True,
-                          'tools.staticdir.dir': os.path.join(constants.STATIC_ROOT_DIR,
-                                                              'clients/web/static'),
+                          'tools.staticdir.dir': os.path.join(constants.STATIC_ROOT_DIR),
                           'request.show_tracebacks': appconf['/']['request.show_tracebacks'],
                           'response.headers.server': 'Girder %s' % __version__,
                           'error_page.default': _errorDefault}})
@@ -248,9 +175,6 @@ def setup(test=False, plugins=None, curConfig=None):
     for name, route in six.viewitems(routeTable):
         if name != constants.GIRDER_ROUTE_ID and name in pluginWebroots:
             cherrypy.tree.mount(pluginWebroots[name], route, appconf)
-
-    if test:
-        application.merge({'server': {'mode': 'testing'}})
 
     return application
 

@@ -1,51 +1,28 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import base64
-import codecs
 import cherrypy
-import io
 import json
 import logging
-import mock
 import os
 import shutil
 import signal
 import six
 import sys
 import unittest
-import uuid
 import warnings
 
 from six import BytesIO
 from six.moves import urllib
-from girder.utility import model_importer, plugin_utilities
 from girder.utility._cache import cache, requestCache
 from girder.utility.server import setup as setupServer
-from girder.constants import AccessType, ROOT_DIR, SettingKey
+from girder.constants import AccessType, ROOT_DIR, ServerMode
 from girder.models import getDbConnection
 from girder.models.model_base import _modelSingletons
 from girder.models.assetstore import Assetstore
 from girder.models.file import File
 from girder.models.setting import Setting
 from girder.models.token import Token
-from girder.api.rest import setContentDisposition
+from girder.settings import SettingKey
 from . import mock_smtp
 from . import mock_s3
 from . import mongo_replicaset
@@ -71,7 +48,8 @@ def startServer(mock=True, mockS3=False):
     dbName = cherrypy.config['database']['uri'].split('/')[-1]
     usedDBs[dbName] = True
 
-    server = setupServer(test=True, plugins=enabledPlugins)
+    # By default, this passes "[]" to "plugins", disabling any installed plugins
+    server = setupServer(mode=ServerMode.TESTING, plugins=enabledPlugins)
 
     if mock:
         cherrypy.server.unsubscribe()
@@ -131,7 +109,7 @@ def dropTestDatabase(dropModels=True):
 
     if 'girder_test_' not in dbName:
         raise Exception('Expected a testing database name, but got %s' % dbName)
-    if dbName in db_connection.database_names():
+    if dbName in db_connection.list_database_names():
         if dbName not in usedDBs and 'newdb' in os.environ.get('EXTRADEBUG', '').split():
             raise Exception('Warning: database %s already exists' % dbName)
         db_connection.drop_database(dbName)
@@ -147,7 +125,7 @@ def dropGridFSDatabase(dbName):
     :param dbName: the name of the database to drop.
     """
     db_connection = getDbConnection()
-    if dbName in db_connection.database_names():
+    if dbName in db_connection.list_database_names():
         if dbName not in usedDBs and 'newdb' in os.environ.get('EXTRADEBUG', '').split():
             raise Exception('Warning: database %s already exists' % dbName)
         db_connection.drop_database(dbName)
@@ -165,38 +143,19 @@ def dropFsAssetstore(path):
         shutil.rmtree(path)
 
 
-def mockPluginDir(path):
-    """
-    Modify the location that the server will search when loading plugins. Call this prior to
-    calling startServer. Returns the original un-mocked function.
-
-    :param path: The directory in which to search for plugins.
-    """
-    oldFn = plugin_utilities.getPluginDir
-    plugin_utilities.getPluginDir = mock.Mock(return_value=path)
-    return oldFn
-
-
-def unmockPluginDir(oldFn):
-    """
-    Restore the getPluginDir function to its original un-mocked version.
-    """
-    plugin_utilities.getPluginDir = oldFn
-
-
-class TestCase(unittest.TestCase, model_importer.ModelImporter):
+class TestCase(unittest.TestCase):
     """
     Test case base class for the application. Adds helpful utilities for
     database and HTTP communication.
     """
+
     def setUp(self, assetstoreType=None, dropModels=True):
         """
         We want to start with a clean database each time, so we drop the test
         database before each test. We then add an assetstore so the file model
         can be used without 500 errors.
         :param assetstoreType: if 'gridfs' or 's3', use that assetstore.
-            'gridfsrs' uses a GridFS assetstore with a replicaset, and
-            'gridfsshard' one with a sharding server.  For any other value, use
+            'gridfsrs' uses a GridFS assetstore with a replicaset. For any other value, use
             a filesystem assetstore.
         """
         self.assetstoreType = assetstoreType
@@ -207,7 +166,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         if assetstoreType == 'gridfs':
             # Name this as '_auto' to prevent conflict with assetstores created
             # within test methods
-            gridfsDbName = 'girder_test_%s_assetstore_auto' % assetstoreName
+            gridfsDbName = 'girder_test_%s_assetstore_auto' % assetstoreName.replace('.', '_')
             dropGridFSDatabase(gridfsDbName)
             self.assetstore = Assetstore().createGridFsAssetstore(name='Test', db=gridfsDbName)
         elif assetstoreType == 'gridfsrs':
@@ -218,14 +177,6 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
                 name='Test', db=gridfsDbName,
                 mongohost='mongodb://127.0.0.1:27070,127.0.0.1:27071,'
                 '127.0.0.1:27072', replicaset='replicaset')
-        elif assetstoreType == 'gridfsshard':
-            gridfsDbName = 'girder_test_%s_shard_assetstore_auto' % assetstoreName
-            self.replicaSetConfig = mongo_replicaset.makeConfig(
-                port=27073, shard=True, sharddb=None)
-            mongo_replicaset.startMongoReplicaSet(self.replicaSetConfig)
-            self.assetstore = Assetstore().createGridFsAssetstore(
-                name='Test', db=gridfsDbName,
-                mongohost='mongodb://127.0.0.1:27073', shard='auto')
         elif assetstoreType == 's3':
             self.assetstore = Assetstore().createS3Assetstore(
                 name='Test', bucket='bucketname', accessKeyId='test',
@@ -235,11 +186,10 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             self.assetstore = Assetstore().createFilesystemAssetstore(
                 name='Test', root=assetstorePath)
 
-        addr = ':'.join(map(str, mockSmtp.address or ('localhost', 25)))
-        settings = Setting()
-        settings.set(SettingKey.SMTP_HOST, addr)
-        settings.set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
-        settings.set(SettingKey.PLUGINS_ENABLED, enabledPlugins)
+        host, port = mockSmtp.address or ('localhost', 25)
+        Setting().set(SettingKey.SMTP_HOST, host)
+        Setting().set(SettingKey.SMTP_PORT, port)
+        Setting().set(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE, 0)
 
         if os.environ.get('GIRDER_TEST_DATABASE_CONFIG'):
             setup_database.main(os.environ['GIRDER_TEST_DATABASE_CONFIG'])
@@ -249,18 +199,12 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         Stop any services that we started just for this test.
         """
         # If "self.setUp" is overridden, "self.assetstoreType" may not be set
-        if getattr(self, 'assetstoreType', None) in ('gridfsrs', 'gridfsshard'):
+        if getattr(self, 'assetstoreType', None) == 'gridfsrs':
             mongo_replicaset.stopMongoReplicaSet(self.replicaSetConfig)
 
         # Invalidate cache regions which persist across tests
         cache.invalidate()
         requestCache.invalidate()
-
-    def mockPluginDir(self, path):
-        self._oldPluginDirFn = mockPluginDir(path)
-
-    def unmockPluginDir(self):
-        unmockPluginDir(self._oldPluginDirFn)
 
     def assertStatusOk(self, response):
         """
@@ -429,10 +373,10 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             })
         self.assertStatusOk(resp)
 
-        fields = [('offset', 0), ('uploadId', resp.json['_id'])]
-        files = [('chunk', name, contents)]
-        resp = self.multipartRequest(
-            path='/file/chunk', user=user, fields=fields, files=files)
+        resp = self.request(
+            path='/file/chunk', method='POST', user=user, body=contents, params={
+                'uploadId': resp.json['_id']
+            }, type=mimeType)
         self.assertStatusOk(resp)
 
         file = resp.json
@@ -461,7 +405,6 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
         """
         Helper method for creating an authentication token for the user.
         """
-
         token = Token().createToken(user)
         return str(token['_id'])
 
@@ -486,7 +429,7 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
                 prefix='/api/v1', isJson=True, basicAuth=None, body=None,
                 type=None, exception=False, cookie=None, token=None,
                 additionalHeaders=None, useHttps=False,
-                authHeader='Girder-Authorization', appPrefix=''):
+                authHeader='Authorization', appPrefix=''):
         """
         Make an HTTP request.
 
@@ -566,11 +509,10 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             try:
                 response.json = json.loads(body)
             except ValueError:
-                raise AssertionError('Did not receive JSON response')
+                raise AssertionError('Received non-JSON response: ' + body)
 
         if not exception and response.output_status.startswith(b'500'):
-            raise AssertionError("Internal server error: %s" %
-                                 self.getBody(response))
+            raise AssertionError('Internal server error: %s' % self.getBody(response))
 
         return response
 
@@ -592,116 +534,6 @@ class TestCase(unittest.TestCase, model_importer.ModelImporter):
             data += chunk
 
         return data
-
-    def multipartRequest(self, fields, files, path, method='POST', user=None,
-                         prefix='/api/v1', isJson=True, token=None):
-        """
-        Make an HTTP request with multipart/form-data encoding. This can be
-        used to send files with the request.
-
-        :param fields: List of (name, value) tuples.
-        :param files: List of (name, filename, content) tuples.
-        :param path: The path part of the URI.
-        :type path: str
-        :param method: The HTTP method.
-        :type method: str
-        :param prefix: The prefix to use before the path.
-        :param isJson: Whether the response is a JSON object.
-        :param token: Auth token to use.
-        :type token: str
-        :returns: The cherrypy response object from the request.
-        """
-        contentType, body, size = MultipartFormdataEncoder().encode(fields, files)
-
-        headers = [('Host', '127.0.0.1'),
-                   ('Accept', 'application/json'),
-                   ('Content-Type', contentType),
-                   ('Content-Length', str(size))]
-
-        app = cherrypy.tree.apps['']
-        request, response = app.get_serving(local, remote, 'http', 'HTTP/1.1')
-        request.show_tracebacks = True
-
-        if token is not None:
-            headers.append(('Girder-Token', token))
-        elif user is not None:
-            headers.append(('Girder-Token', self._genToken(user)))
-
-        fd = io.BytesIO(body)
-        # Python2 will not match Unicode URLs
-        url = str(prefix + path)
-        try:
-            response = request.run(method, url, None, 'HTTP/1.1', headers, fd)
-        finally:
-            fd.close()
-
-        if isJson:
-            body = self.getBody(response)
-            try:
-                response.json = json.loads(body)
-            except ValueError:
-                raise AssertionError('Did not receive JSON response')
-
-        if response.output_status.startswith(b'500'):
-            raise AssertionError("Internal server error: %s" %
-                                 self.getBody(response))
-
-        return response
-
-
-class MultipartFormdataEncoder(object):
-    """
-    This class is adapted from http://stackoverflow.com/a/18888633/2550451
-
-    It is used as a helper for creating multipart/form-data requests to
-    simulate file uploads.
-    """
-    def __init__(self):
-        self.boundary = uuid.uuid4().hex
-        self.contentType = 'multipart/form-data; boundary=%s' % self.boundary
-
-    @classmethod
-    def u(cls, s):
-        if sys.hexversion < 0x03000000 and isinstance(s, str):
-            s = s.decode('utf-8')
-        if sys.hexversion >= 0x03000000 and isinstance(s, bytes):
-            s = s.decode('utf-8')
-        return s
-
-    def iter(self, fields, files):
-        encoder = codecs.getencoder('utf-8')
-        for (key, value) in fields:
-            key = self.u(key)
-            yield encoder('--%s\r\n' % self.boundary)
-            yield encoder(self.u('Content-Disposition: form-data; '
-                                 'name="%s"\r\n') % key)
-            yield encoder('\r\n')
-            if isinstance(value, int) or isinstance(value, float):
-                value = str(value)
-            yield encoder(self.u(value))
-            yield encoder('\r\n')
-        for (key, filename, content) in files:
-            key = self.u(key)
-            filename = self.u(filename)
-            yield encoder('--%s\r\n' % self.boundary)
-            disposition = setContentDisposition(filename, 'form-data; name="%s"' % key, False)
-            yield encoder(self.u('Content-Disposition: ') + self.u(disposition))
-            yield encoder('Content-Type: application/octet-stream\r\n')
-            yield encoder('\r\n')
-
-            yield (content, len(content))
-            yield encoder('\r\n')
-        yield encoder('--%s--\r\n' % self.boundary)
-
-    def encode(self, fields, files):
-        body = io.BytesIO()
-        size = 0
-        for chunk, chunkLen in self.iter(fields, files):
-            if not isinstance(chunk, six.binary_type):
-                chunk = chunk.encode('utf8')
-            body.write(chunk)
-            size += chunkLen
-        return self.contentType, body.getvalue(), size
 
 
 def _sigintHandler(*args):

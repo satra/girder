@@ -11,11 +11,11 @@ describe('Create and log in to a user for testing', function () {
         runs(function () {
             settingSaved = false;
             girder.rest.restRequest({
-                path: 'system/setting',
-                type: 'PUT',
+                url: 'system/setting',
+                method: 'PUT',
                 data: {
                     key: 'core.collection_create_policy',
-                    value: JSON.stringify({groups: [], open: true, users: []})
+                    value: JSON.stringify({ groups: [], open: true, users: [] })
                 }
             })
                 .done(function () {
@@ -361,12 +361,14 @@ describe('Change the terms', function () {
         waitsFor(function () {
             return $('.g-collection-list-entry').length > 0;
         });
+        girderTest.waitForLoad();
         runs(function () {
             $('.g-collection-link:contains("Terms Collection")').click();
         });
         waitsFor(function () {
             return $('.g-collection-header').length > 0;
         });
+        girderTest.waitForLoad();
     });
 
     it('edit the collection terms', function () {

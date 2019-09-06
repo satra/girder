@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cherrypy
 import datetime
 import dateutil.parser
@@ -77,7 +59,7 @@ def camelcase(value):
     :returns: the value converted to camel case.
     """
     return ''.join(x.capitalize() if x else '_' for x in
-                   re.split("[._]+", value))
+                   re.split('[._]+', value))
 
 
 def mkdir(path, mode=0o777, recurse=True, existOk=True):
@@ -134,6 +116,7 @@ class JsonEncoder(json.JSONEncoder):
     sensibly serialized. This is used in Girder's REST layer to serialize
     route return values when JSON is requested.
     """
+
     def default(self, obj):
         event = girder.events.trigger('rest.json_encode', obj)
         if len(event.responses):
@@ -150,6 +133,7 @@ class RequestBodyStream(object):
     """
     Wraps a cherrypy request body into a more abstract file-like object.
     """
+
     _ITER_CHUNK_LEN = 65536
 
     def __init__(self, stream, size=None):
@@ -168,14 +152,14 @@ class RequestBodyStream(object):
     def __len__(self):
         return self.getSize()
 
-    def next(self):
+    def __next__(self):
         data = self.read(self._ITER_CHUNK_LEN)
         if not data:
             raise StopIteration
         return data
 
-    def __next__(self):
-        return self.next()
+    def next(self):
+        return self.__next__()
 
     def getSize(self):
         """
@@ -199,6 +183,8 @@ def optionalArgumentDecorator(baseDecorator):
     be passed to the target decorator as additional arguments.
 
     For example, this may be used as:
+
+    .. code-block:: python
 
         @optionalArgumentDecorator
         def myDec(fun, someArg=None):

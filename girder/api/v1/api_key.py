@@ -1,30 +1,13 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 from ..describe import Description, autoDescribeRoute
 from ..rest import Resource, filtermodel
+from girder.api import access
 from girder.exceptions import RestException
 from girder.models.api_key import ApiKey as ApiKeyModel
 from girder.models.setting import Setting
 from girder.models.user import User
-from girder.constants import AccessType, SettingKey
-from girder.api import access
+from girder.constants import AccessType
+from girder.settings import SettingKey
 
 
 class ApiKey(Resource):
@@ -128,11 +111,10 @@ class ApiKey(Resource):
 
         user, token = ApiKeyModel().createToken(key, days=duration)
 
-        self.sendAuthTokenCookie(token=token, days=duration)
-
         # Return the same structure as a normal user login, except do not
         # include the full user document since the key may not authorize
-        # reading user information.
+        # reading user information. We also intentionally do not set the cookie
+        # as we would during a normal login, in case someone is using this via swagger.
         return {
             'user': {
                 '_id': user['_id']

@@ -1,27 +1,20 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from pkg_resources import DistributionNotFound, get_distribution
 
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
+try:
+    __version__ = get_distribution(__name__).version
+except DistributionNotFound:
+    # package is not installed
+    __version__ = None
+
+__license__ = 'Apache 2.0'
 
 import diskcache
 import errno
 import getpass
 import glob
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,25 +24,13 @@ import six
 import tempfile
 
 from contextlib import contextmanager
-from requests_toolbelt import MultipartEncoder
-
-__version__ = '2.3.0'
-__license__ = 'Apache 2.0'
 
 DEFAULT_PAGE_LIMIT = 50  # Number of results to fetch per request
 REQ_BUFFER_SIZE = 65536  # Chunk size when iterating a download body
 
 _safeNameRegex = re.compile(r'^[/\\]+')
 
-
-def _compareDicts(x, y):
-    """
-    Compare two dictionaries with metadata.
-
-    :param x: First metadata item.
-    :param y: Second metadata item.
-    """
-    return len(x) == len(y) == len(set(x.items()) & set(y.items()))
+_logger = logging.getLogger('girder_client.lib')
 
 
 def _safeMakedirs(path):
@@ -83,6 +64,7 @@ class HttpError(requests.HTTPError):
     exception should instead raise requests.HTTPError manually or through another mechanism
     such as requests.Response.raise_for_status.
     """
+
     def __init__(self, status, text, url, method, response=None):
         super(HttpError, self).__init__('HTTP error %s: %s %s' % (status, method, url),
                                         response=response)
@@ -93,6 +75,13 @@ class HttpError(requests.HTTPError):
 
     def __str__(self):
         return super(HttpError, self).__str__() + '\nResponse text: ' + self.responseText
+
+
+class IncompleteResponseError(requests.RequestException):
+    def __init__(self, message, expected, received, response=None):
+        super(IncompleteResponseError, self).__init__('%s (%d of %d bytes received)' % (
+            message, received, expected
+        ), response=response)
 
 
 class _NoopProgressReporter(object):
@@ -112,26 +101,13 @@ class _NoopProgressReporter(object):
         pass
 
 
-# Used for fast non-multipart upload
 class _ProgressBytesIO(six.BytesIO):
     def __init__(self, *args, **kwargs):
         self.reporter = kwargs.pop('reporter')
         six.BytesIO.__init__(self, *args, **kwargs)
 
-    def read(self, _size):
+    def read(self, _size=-1):
         _chunk = six.BytesIO.read(self, _size)
-        self.reporter.update(len(_chunk))
-        return _chunk
-
-
-# Used for deprecated multipart upload
-class _ProgressMultiPartEncoder(MultipartEncoder):
-    def __init__(self, *args, **kwargs):
-        self.reporter = kwargs.pop('reporter')
-        MultipartEncoder.__init__(self, *args, **kwargs)
-
-    def read(self, _size):
-        _chunk = MultipartEncoder.read(self, _size)
         self.reporter.update(len(_chunk))
         return _chunk
 
@@ -174,9 +150,9 @@ class GirderClient(object):
         returns `GirderClient.DEFAULT_LOCALHOST_PORT` if `hostname` is `localhost`,
         and finally returns `GirderClient.DEFAULT_HTTP_PORT`.
         """
-        if scheme == "https":
+        if scheme == 'https':
             return GirderClient.DEFAULT_HTTPS_PORT
-        if hostname == "localhost":
+        if hostname == 'localhost':
             return GirderClient.DEFAULT_LOCALHOST_PORT
         return GirderClient.DEFAULT_HTTP_PORT
 
@@ -185,10 +161,10 @@ class GirderClient(object):
         """Get default scheme based on the hostname.
         Returns `http` if `hostname` is `localhost` otherwise returns `https`.
         """
-        if hostname == "localhost":
-            return "http"
+        if hostname == 'localhost':
+            return 'http'
         else:
-            return "https"
+            return 'https'
 
     def __init__(self, host=None, port=None, apiRoot=None, scheme=None, apiUrl=None,
                  cacheSettings=None, progressReporterCls=None):
@@ -245,6 +221,7 @@ class GirderClient(object):
         self.token = ''
         self._folderUploadCallbacks = []
         self._itemUploadCallbacks = []
+        self._serverVersion = []
         self._serverApiDescription = {}
         self.incomingMetadata = {}
         self.localMetadata = {}
@@ -337,18 +314,17 @@ class GirderClient(object):
             if username is None or password is None:
                 raise Exception('A user name and password are required')
 
-            url = self.urlBase + 'user/authentication'
-            authResponse = self._requestFunc('get')(url, auth=(username, password))
-
-            if authResponse.status_code in (401, 403):
-                raise AuthenticationError()
-            elif not authResponse.ok:
-                raise HttpError(authResponse.status_code, authResponse.text, url, 'GET',
-                                response=authResponse)
-
-            resp = authResponse.json()
+            try:
+                resp = self.sendRestRequest('get', 'user/authentication', auth=(username, password),
+                                            headers={'Girder-Token': None})
+            except HttpError as e:
+                if e.status in (401, 403):
+                    raise AuthenticationError()
+                raise
 
             self.setToken(resp['authToken']['token'])
+
+        return resp['user']
 
     def setToken(self, token):
         """
@@ -370,9 +346,17 @@ class GirderClient(object):
         :type useCached: bool
         :return: The API version as a list (e.g. ``['1', '0', '0']``)
         """
-        description = self.getServerAPIDescription(useCached)
-        version = description.get('info', {}).get('version')
-        return version.split('.') if version else None
+        if not self._serverVersion or not useCached:
+            response = self.get('system/version')
+            if 'release' in response:
+                release = response['release']  # girder >= 3
+            else:
+                release = response['apiVersion']  # girder < 3
+
+            # Do not include any more than 3 version components in the patch version
+            self._serverVersion = release.split('.', 2)
+
+        return self._serverVersion
 
     def getServerAPIDescription(self, useCached=True):
         """
@@ -428,7 +412,8 @@ class GirderClient(object):
             return getattr(requests, method.lower())
 
     def sendRestRequest(self, method, path, parameters=None,
-                        data=None, files=None, json=None, headers=None, jsonResp=True):
+                        data=None, files=None, json=None, headers=None, jsonResp=True,
+                        **kwargs):
         """
         This method looks up the appropriate method, constructs a request URL
         from the base URL, path, and parameters, and then sends the request. If
@@ -481,7 +466,8 @@ class GirderClient(object):
             _headers.update(headers)
 
         result = f(
-            url, params=parameters, data=data, files=files, json=json, headers=_headers)
+            url, params=parameters, data=data, files=files, json=json, headers=_headers,
+            **kwargs)
 
         # If success, return the json object. Otherwise throw an exception.
         if result.status_code in (200, 201):
@@ -548,17 +534,15 @@ class GirderClient(object):
 
         return self.get(route)
 
-    def resourceLookup(self, path, test=False):
+    def resourceLookup(self, path):
         """
         Look up and retrieve resource in the data hierarchy by path.
 
         :param path: The path of the resource. The path must be an absolute
             Unix path starting with either "/user/[user name]" or
             "/collection/[collection name]".
-        :param test: Whether or not to return None, if the path does not
-            exist, rather than throwing an exception.
         """
-        return self.get('resource/lookup', parameters={'path': path, 'test': test})
+        return self.get('resource/lookup', parameters={'path': path})
 
     def listResource(self, path, params=None, limit=None, offset=None):
         """
@@ -630,7 +614,6 @@ class GirderClient(object):
             same name already exists.
         :param metadata: JSON metadata to set on item.
         """
-
         if metadata is not None and not isinstance(metadata, six.string_types):
             metadata = json.dumps(metadata)
 
@@ -747,7 +730,6 @@ class GirderClient(object):
             the same name exists.
         :param metadata: JSON metadata to set on the folder.
         """
-
         if metadata is not None and not isinstance(metadata, six.string_types):
             metadata = json.dumps(metadata)
 
@@ -810,7 +792,6 @@ class GirderClient(object):
         :param access: JSON document specifying access control.
         :param public: Boolean specificying the public value.
         """
-
         if access is not None and not isinstance(access, six.string_types):
             access = json.dumps(access)
 
@@ -834,8 +815,7 @@ class GirderClient(object):
         :param filename: name of file to look for under the parent item.
         :param filepath: path to file on disk.
         """
-        path = 'item/' + itemId + '/files'
-        itemFiles = self.get(path)
+        itemFiles = self.listFile(itemId)
         for itemFile in itemFiles:
             if filename == itemFile['name']:
                 file_id = itemFile['_id']
@@ -871,9 +851,6 @@ class GirderClient(object):
         filepath = os.path.abspath(filepath)
         filesize = os.path.getsize(filepath)
 
-        if filesize == 0:
-            return
-
         # Check if the file already exists by name and size in the file.
         fileId, current = self.isFileCurrent(itemId, filename, filepath)
         if fileId is not None and current:
@@ -892,8 +869,7 @@ class GirderClient(object):
             if '_id' not in obj:
                 raise Exception(
                     'After creating an upload token for replacing file '
-                    'contents, expected an object with an id. Got instead: ' +
-                    json.dumps(obj))
+                    'contents, expected an object with an id. Got instead: ' + json.dumps(obj))
         else:
             if mimeType is None:
                 # Attempt to guess MIME type if not passed explicitly
@@ -990,9 +966,6 @@ class GirderClient(object):
         filepath = os.path.abspath(filepath)
         filesize = os.path.getsize(filepath)
 
-        if filesize == 0:
-            return
-
         if mimeType is None:
             # Attempt to guess MIME type if not passed explicitly
             mimeType, _ = mimetypes.guess_type(filepath)
@@ -1032,24 +1005,9 @@ class GirderClient(object):
                 if isinstance(chunk, six.text_type):
                     chunk = chunk.encode('utf8')
 
-                if self.getServerVersion() >= ['2', '2']:
-                    uploadObj = self.post(
-                        'file/chunk?offset=%d&uploadId=%s' % (offset, uploadId),
-                        data=_ProgressBytesIO(chunk, reporter=reporter))
-                else:
-                    # Prior to version 2.2 the server only supported multipart uploads
-                    parameters = {
-                        'offset': offset,
-                        'uploadId': uploadId
-                    }
-
-                    m = _ProgressMultiPartEncoder(
-                        reporter=reporter,
-                        fields={'chunk': ('chunk', chunk, 'application/octet-stream')},
-                    )
-
-                    uploadObj = self.post('file/chunk', parameters=parameters,
-                                          data=m, headers={'Content-Type': m.content_type})
+                uploadObj = self.post(
+                    'file/chunk?offset=%d&uploadId=%s' % (offset, uploadId),
+                    data=_ProgressBytesIO(chunk, reporter=reporter))
 
                 if '_id' not in uploadObj:
                     raise Exception(
@@ -1142,8 +1100,7 @@ class GirderClient(object):
         if '_id' not in obj:
             raise Exception(
                 'After creating an upload token for replacing file '
-                'contents, expected an object with an id. Got instead: ' +
-                json.dumps(obj))
+                'contents, expected an object with an id. Got instead: ' + json.dumps(obj))
 
         return self._uploadContents(obj, stream, size)
 
@@ -1166,6 +1123,17 @@ class GirderClient(object):
         :param metadata: dictionary of metadata to set on folder.
         """
         path = 'folder/' + folderId + '/metadata'
+        obj = self.put(path, json=metadata)
+        return obj
+
+    def addMetadataToCollection(self, collectionId, metadata):
+        """
+        Takes a collection ID and a dictionary containing the metadata
+
+        :param collectionId: ID of the collection to set metadata on.
+        :param metadata: dictionary of metadata to set on collection.
+        """
+        path = 'collection/' + collectionId + '/metadata'
         obj = self.put(path, json=metadata)
         return obj
 
@@ -1205,13 +1173,8 @@ class GirderClient(object):
 
         :returns: The request
         """
-
-        url = '%sfile/%s/download' % (self.urlBase, fileId)
-        req = self._requestFunc('get')(url, stream=True, headers={'Girder-Token': self.token})
-        if not req.ok:
-            raise HttpError(req.status_code, req.text, url, 'GET', response=req)
-
-        return req
+        path = 'file/%s/download' % fileId
+        return self.sendRestRequest('get', path, stream=True, jsonResp=False)
 
     def downloadFile(self, fileId, path, created=None):
         """
@@ -1220,7 +1183,8 @@ class GirderClient(object):
         :param fileId: The ID of the Girder file to download.
         :param path: The path to write the file to, or a file-like object.
         """
-        created = created or self.getFile(fileId)['created']
+        fileObj = self.getFile(fileId)
+        created = created or fileObj['created']
         cacheKey = '\n'.join([self.urlBase, fileId, created])
 
         # see if file is in local cache
@@ -1244,6 +1208,11 @@ class GirderClient(object):
                 for chunk in req.iter_content(chunk_size=REQ_BUFFER_SIZE):
                     reporter.update(len(chunk))
                     tmp.write(chunk)
+
+        size = os.stat(tmp.name).st_size
+        if size != fileObj['size']:
+            os.remove(tmp.name)
+            raise IncompleteResponseError('File %s download' % fileId, fileObj['size'], size)
 
         # save file in cache
         if self.cache is not None:
@@ -1270,7 +1239,6 @@ class GirderClient(object):
 
         :returns: The request content iterator.
         """
-
         req = self._streamingFileDownload(fileId)
 
         return req.iter_content(chunk_size=chunkSize)
@@ -1366,8 +1334,7 @@ class GirderClient(object):
             for item in items:
                 _id = item['_id']
                 self.incomingMetadata[_id] = item
-                if (sync and _id in self.localMetadata and
-                        _compareDicts(item, self.localMetadata[_id])):
+                if sync and _id in self.localMetadata and item == self.localMetadata[_id]:
                     continue
                 self.downloadItem(item['_id'], dest, name=item['name'])
 
@@ -1431,7 +1398,6 @@ class GirderClient(object):
 
         :param dest: The local download destination.
         """
-
         try:
             with open(os.path.join(dest, '.girder_metadata'), 'r') as fh:
                 self.localMetadata = json.loads(fh.read())
@@ -1670,7 +1636,7 @@ class GirderClient(object):
                     # pass that as the parent_type
                     self._uploadFolderRecursive(
                         fullEntry, folder['_id'], 'folder', leafFoldersAsItems, reuseExisting,
-                        dryRun=dryRun, reference=reference)
+                        blacklist=blacklist, dryRun=dryRun, reference=reference)
                 else:
                     self._uploadAsItem(
                         entry, folder['_id'], fullEntry, reuseExisting, dryRun=dryRun,
@@ -1739,7 +1705,9 @@ class GirderClient(object):
 
     def _checkResourcePath(self, objId):
         if isinstance(objId, six.string_types) and objId.startswith('/'):
-            obj = self.resourceLookup(objId, test=True)
-            if obj is not None:
-                return obj['_id']
+            try:
+                return self.resourceLookup(objId)['_id']
+            except requests.HTTPError:
+                return None
+
         return objId

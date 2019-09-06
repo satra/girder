@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 from ..describe import Description, autoDescribeRoute
 from ..rest import Resource, filtermodel, setResponseHeader, setContentDisposition
 from girder.api import access
@@ -24,6 +6,7 @@ from girder.constants import AccessType, TokenScope
 from girder.exceptions import RestException
 from girder.models.folder import Folder as FolderModel
 from girder.utility import ziputil
+from girder.utility.model_importer import ModelImporter
 from girder.utility.progress import ProgressContext
 
 
@@ -53,7 +36,7 @@ class Folder(Resource):
     @filtermodel(model=FolderModel)
     @autoDescribeRoute(
         Description('Search for folders by certain properties.')
-        .notes('You must pass either a "folderId" or "text" field'
+        .notes('You must pass either a "folderId" or "text" field '
                'to specify how you are searching for folders.  '
                'If you omit one of these parameters the request will fail and respond : '
                '"Invalid search mode."')
@@ -83,7 +66,7 @@ class Folder(Resource):
         user = self.getCurrentUser()
 
         if parentType and parentId:
-            parent = self.model(parentType).load(
+            parent = ModelImporter.model(parentType).load(
                 parentId, user=user, level=AccessType.READ, exc=True)
 
             filters = {}
@@ -94,12 +77,12 @@ class Folder(Resource):
             if name:
                 filters['name'] = name
 
-            return list(self._model.childFolders(
+            return self._model.childFolders(
                 parentType=parentType, parent=parent, user=user,
-                offset=offset, limit=limit, sort=sort, filters=filters))
+                offset=offset, limit=limit, sort=sort, filters=filters)
         elif text:
-            return list(self._model.textSearch(
-                text, user=user, limit=limit, offset=offset, sort=sort))
+            return self._model.textSearch(
+                text, user=user, limit=limit, offset=offset, sort=sort)
         else:
             raise RestException('Invalid search mode.')
 
@@ -117,8 +100,7 @@ class Folder(Resource):
                 folder, user=self.getCurrentUser(), level=AccessType.READ)
         }
 
-    @access.cookie
-    @access.public(scope=TokenScope.DATA_READ)
+    @access.public(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description('Download an entire folder as a zip archive.')
         .modelParam('id', model=FolderModel, level=AccessType.READ)
@@ -174,7 +156,7 @@ class Folder(Resource):
             folder = self._model.setMetadata(folder, metadata)
 
         if parentType and parentId:
-            parent = self.model(parentType).load(
+            parent = ModelImporter.model(parentType).load(
                 parentId, level=AccessType.WRITE, user=user, exc=True)
             if (parentType, parent['_id']) != (folder['parentCollection'], folder['parentId']):
                 folder = self._model.move(folder, parent, parentType)
@@ -238,7 +220,7 @@ class Folder(Resource):
     def createFolder(self, public, parentType, parentId, name, description,
                      reuseExisting, metadata):
         user = self.getCurrentUser()
-        parent = self.model(parentType).load(
+        parent = ModelImporter.model(parentType).load(
             id=parentId, user=user, level=AccessType.WRITE, exc=True)
 
         newFolder = self._model.createFolder(
@@ -320,10 +302,10 @@ class Folder(Resource):
                enum=['folder', 'user', 'collection'])
         .param('parentId', 'The ID of the parent document.', required=False)
         .param('name', 'Name for the new folder.', required=False)
-        .param('description', "Description for the new folder.", required=False)
-        .param('public', "Whether the folder should be publicly visible. By "
-               "default, inherits the value from parent folder, or in the case "
-               "of user or collection parentType, defaults to False. If "
+        .param('description', 'Description for the new folder.', required=False)
+        .param('public', 'Whether the folder should be publicly visible. By '
+               'default, inherits the value from parent folder, or in the case '
+               'of user or collection parentType, defaults to False. If '
                "'original', use the value of the original folder.",
                required=False, enum=['true', 'false', 'original'])
         .param('progress', 'Whether to record progress on this task.',
@@ -337,7 +319,7 @@ class Folder(Resource):
         user = self.getCurrentUser()
         parentType = parentType or folder['parentCollection']
         if parentId:
-            parent = self.model(parentType).load(
+            parent = ModelImporter.model(parentType).load(
                 id=parentId, user=user, level=AccessType.WRITE, exc=True)
         else:
             parent = None
@@ -399,7 +381,7 @@ class Folder(Resource):
 
     @access.public(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
-        Description('Get the path to the root of the folder\'s hierarchy.')
+        Description("Get the path to the root of the folder's hierarchy.")
         .modelParam('id', model=FolderModel, level=AccessType.READ)
         .errorResponse('ID was invalid.')
         .errorResponse('Read access was denied for the folder.', 403)

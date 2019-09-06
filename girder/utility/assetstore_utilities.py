@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 from ..constants import AssetstoreType
 from ..exceptions import NoAssetstoreAdapter
 from .filesystem_assetstore_adapter import FilesystemAssetstoreAdapter
@@ -58,7 +40,6 @@ def getAssetstoreAdapter(assetstore, instance=True):
 
 
 def setAssetstoreAdapter(storeType, cls):
-
     """
     This updates the internal assetstore adapter table with either a new entry,
     or a modification to an existing entry. Subsequent calls to
@@ -84,7 +65,7 @@ def fileIndexFields():
     different assetstore types.
     """
     return list(set(
-        FilesystemAssetstoreAdapter.fileIndexFields() +
-        GridFsAssetstoreAdapter.fileIndexFields() +
-        S3AssetstoreAdapter.fileIndexFields()
+        FilesystemAssetstoreAdapter.fileIndexFields()
+        + GridFsAssetstoreAdapter.fileIndexFields()
+        + S3AssetstoreAdapter.fileIndexFields()
     ))

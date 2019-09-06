@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import bson
 from hashlib import sha512
 import pymongo
@@ -31,7 +13,7 @@ from girder.external.mongodb_proxy import MongoProxy
 from girder.models import getDbConnection
 from girder.exceptions import ValidationException
 from girder.models.file import File
-from . import hash_state
+from . import _hash_state
 from .abstract_assetstore_adapter import AbstractAssetstoreAdapter
 
 
@@ -55,40 +37,6 @@ def _ensureChunkIndices(collection):
         ('uuid', pymongo.ASCENDING),
         ('n', pymongo.ASCENDING)
     ], unique=True)
-
-
-def _setupSharding(collection, keyname='uuid'):
-    """
-    If we are communicating with a sharded server, and the collection is not
-    sharded, ask for it to be sharded based on a key.
-
-    :param collection: a connection to a mongo collection.
-    :param keyname: the name of the key to shard on.
-    :returns: True if sharding was added, False if it could not be added, or
-        'present' if already sharded.
-    """
-    database = collection.database
-    client = database.client
-    stat = client.admin.command('serverStatus')
-    # sharding will be non-None if the client is communicating with a mongos
-    # instance. For mongo 3.0 we have to check the process name for 'mongos'.
-    if not stat.get('sharding') and 'mongos' not in stat.get('process', ''):
-        return False
-    if database.command('collstats', collection.name).get('sharded'):
-        return 'present'
-    try:
-        client.admin.command('enableSharding', database.name)
-    except pymongo.errors.OperationFailure:
-        # sharding may already be enabled
-        pass
-    try:
-        client.admin.command(
-            'shardCollection', '%s.%s' % (database.name, collection.name),
-            key={keyname: 1})
-        return True
-    except pymongo.errors.OperationFailure:
-        pass
-    return False
 
 
 class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
@@ -133,11 +81,10 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
         try:
             # Guard in case the connectionArgs is unhashable
             key = (self.assetstore.get('mongohost'),
-                   self.assetstore.get('replicaset'),
-                   self.assetstore.get('shard'))
+                   self.assetstore.get('replicaset'))
             if key in _recentConnections:
-                recent = (time.time() - _recentConnections[key]['created'] <
-                          RECENT_CONNECTION_CACHE_TIME)
+                recent = (time.time() - _recentConnections[key]['created']
+                          < RECENT_CONNECTION_CACHE_TIME)
         except TypeError:
             key = None
         try:
@@ -150,8 +97,6 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
             self.chunkColl = MongoProxy(client[self.assetstore['db']].chunk)
             if not recent:
                 _ensureChunkIndices(self.chunkColl)
-                if self.assetstore.get('shard') == 'auto':
-                    _setupSharding(self.chunkColl)
                 if key is not None:
                     if len(_recentConnections) >= RECENT_CONNECTION_CACHE_MAX_SIZE:
                         _recentConnections.clear()
@@ -174,7 +119,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
         Creates a UUID that will be used to uniquely link each chunk to
         """
         upload['chunkUuid'] = uuid.uuid4().hex
-        upload['sha512state'] = hash_state.serializeHex(sha512())
+        upload['sha512state'] = _hash_state.serializeHex(sha512())
         return upload
 
     def uploadChunk(self, upload, chunk):
@@ -192,7 +137,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
             chunk = BytesIO(chunk)
 
         # Restore the internal state of the streaming SHA-512 checksum
-        checksum = hash_state.restoreHex(upload['sha512state'], 'sha512')
+        checksum = _hash_state.restoreHex(upload['sha512state'], 'sha512')
 
         # TODO: when saving uploads is optional, we can conditionally try to
         # fetch the last chunk.  Add these line before `lastChunk = ...`:
@@ -221,7 +166,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
         size = 0
         startingN = n
 
-        while upload['received']+size < upload['size']:
+        while upload['received'] + size < upload['size']:
             data = chunk.read(CHUNK_SIZE)
             if not data:
                 break
@@ -256,7 +201,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
             raise
 
         # Persist the internal state of the checksum
-        upload['sha512state'] = hash_state.serializeHex(checksum)
+        upload['sha512state'] = _hash_state.serializeHex(checksum)
         upload['received'] += size
         return upload
 
@@ -282,8 +227,7 @@ class GridFsAssetstoreAdapter(AbstractAssetstoreAdapter):
         Grab the final state of the checksum and set it on the file object,
         and write the generated UUID into the file itself.
         """
-        hash = hash_state.restoreHex(upload['sha512state'],
-                                     'sha512').hexdigest()
+        hash = _hash_state.restoreHex(upload['sha512state'], 'sha512').hexdigest()
 
         file['sha512'] = hash
         file['chunkUuid'] = upload['chunkUuid']

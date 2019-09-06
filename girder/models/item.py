@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import copy
 import datetime
 import json
@@ -30,6 +12,7 @@ from girder import logger
 from girder.constants import AccessType
 from girder.exceptions import ValidationException, GirderException
 from girder.utility import acl_mixin
+from girder.utility.model_importer import ModelImporter
 
 
 class Item(acl_mixin.AccessControlMixin, Model):
@@ -80,8 +63,16 @@ class Item(acl_mixin.AccessControlMixin, Model):
         # name collides with an existing item or folder, we will append (n)
         # onto the end of the name, incrementing n until the name is unique.
         name = doc['name']
+        # If the item already exists with the current name, don't check.
+        # Although we don't want duplicate names, they can occur when there are
+        # simultaneous uploads, and also because Mongo has no guaranteed
+        # multi-collection uniqueness constraints.  If this occurs, and we are
+        # changing a non-name property, don't validate the name (since that may
+        # fail).  If the name is being changed, validate that it is probably
+        # unique.
+        checkName = '_id' not in doc or not self.findOne({'_id': doc['_id'], 'name': name})
         n = 0
-        while True:
+        while checkName:
             q = {
                 'name': name,
                 'folderId': doc['folderId']
@@ -98,7 +89,7 @@ class Item(acl_mixin.AccessControlMixin, Model):
             dupFolder = Folder().findOne(q, fields=['_id'])
             if dupItem is None and dupFolder is None:
                 doc['name'] = name
-                break
+                checkName = False
             else:
                 n += 1
                 name = '%s (%d)' % (doc['name'], n)
@@ -138,6 +129,11 @@ class Item(acl_mixin.AccessControlMixin, Model):
                 self.update({'_id': doc['_id']}, {'$set': {
                     'lowerName': doc['lowerName']
                 }})
+            if 'meta' not in doc:
+                doc['meta'] = {}
+                self.update({'_id': doc['_id']}, {'$set': {
+                    'meta': {}
+                }})
 
             self._removeSupplementalFields(doc, fields)
 
@@ -169,7 +165,7 @@ class Item(acl_mixin.AccessControlMixin, Model):
             '_id': item['folderId']
         }, field='size', amount=inc, multi=False)
 
-        self.model(item['baseParentType']).increment(query={
+        ModelImporter.model(item['baseParentType']).increment(query={
             '_id': item['baseParentId']
         }, field='size', amount=inc, multi=False)
 
@@ -186,7 +182,7 @@ class Item(acl_mixin.AccessControlMixin, Model):
             # this would be:
             # size += File().recalculateSize(file)
             size += file.get('size', 0)
-        delta = size-item.get('size', 0)
+        delta = size - item.get('size', 0)
         if delta:
             logger.info('Item %s was wrong size: was %d, is %d' % (
                 item['_id'], item['size'], size))
@@ -292,7 +288,8 @@ class Item(acl_mixin.AccessControlMixin, Model):
             'baseParentId': folder['baseParentId'],
             'created': now,
             'updated': now,
-            'size': 0
+            'size': 0,
+            'meta': {}
         })
 
     def updateItem(self, item):
@@ -307,6 +304,17 @@ class Item(acl_mixin.AccessControlMixin, Model):
 
         # Validate and save the item
         return self.save(item)
+
+    def filter(self, doc, user=None, additionalKeys=None):
+        """
+        Overrides the parent ``filter`` method to add an empty meta field
+        (if it doesn't exist) to the returned folder.
+        """
+        filteredDoc = super(Item, self).filter(doc, user, additionalKeys=additionalKeys)
+        if 'meta' not in filteredDoc:
+            filteredDoc['meta'] = {}
+
+        return filteredDoc
 
     def setMetadata(self, item, metadata, allowNull=False):
         """
@@ -425,6 +433,7 @@ class Item(acl_mixin.AccessControlMixin, Model):
         newItem = self.createItem(
             folder=folder, name=name, creator=creator, description=description)
         # copy metadata and other extension values
+        newItem['meta'] = copy.deepcopy(srcItem['meta'])
         filteredItem = self.filter(newItem, creator)
         for key in srcItem:
             if key not in filteredItem and key not in newItem:
@@ -486,13 +495,17 @@ class Item(acl_mixin.AccessControlMixin, Model):
 
         if subpath:
             files = list(self.childFiles(item=doc, limit=2))
-            if (len(files) != 1 or files[0]['name'] != doc['name'] or
-                    (includeMetadata and doc.get('meta', {}))):
+            if (len(files) != 1 or files[0]['name'] != doc['name']
+                    or (includeMetadata and doc.get('meta', {}))):
                 path = os.path.join(path, doc['name'])
         metadataFile = 'girder-item-metadata.json'
 
         fileModel = File()
-        for file in self.childFiles(item=doc):
+        # Eagerly evaluate this list, as the MongoDB cursor can time out on long requests
+        # Don't use a "filter" projection here, since returning the full file document is promised
+        # by this function, and file objects tend to not have large fields present
+        childFiles = list(self.childFiles(item=doc))
+        for file in childFiles:
             if not self._mimeFilter(file, mimeFilter):
                 continue
             if file['name'] == metadataFile:

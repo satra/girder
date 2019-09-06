@@ -12,8 +12,6 @@ else()
   set(_separator ":")
 endif()
 
-find_program(PYTEST_EXECUTABLE NAMES pytest)
-
 function(python_tests_init)
   add_test(
     NAME py_coverage_reset
@@ -51,22 +49,11 @@ function(python_tests_init)
   set_property(TEST py_coverage_xml PROPERTY LABELS girder_coverage)
 endfunction()
 
-function(add_python_style_test name input)
-  if(PYTHON_STATIC_ANALYSIS)
-    add_test(
-      NAME ${name}
-      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-      COMMAND "${FLAKE8_EXECUTABLE}" "${input}"
-    )
-    set_property(TEST "${name}" PROPERTY LABELS girder_python)
-  endif()
-endfunction()
-
 function(add_python_test case)
   set(name "server_${case}")
 
   set(_options BIND_SERVER PY2_ONLY RUN_SERIAL)
-  set(_args DBNAME PLUGIN SUBMODULE)
+  set(_args DBNAME PLUGIN SUBMODULE PACKAGE)
   set(_multival_args RESOURCE_LOCKS TIMEOUT EXTERNAL_DATA REQUIRED_FILES COVERAGE_PATHS
                      ENVIRONMENT SETUP_DATABASE)
   cmake_parse_arguments(fn "${_options}" "${_args}" "${_multival_args}" ${ARGN})
@@ -80,7 +67,7 @@ function(add_python_test case)
     set(name "server_${fn_PLUGIN}.${case}")
     set(module plugin_tests.${case}_test)
     set(pythonpath "${PROJECT_SOURCE_DIR}/plugins/${fn_PLUGIN}")
-    set(other_covg ",${PROJECT_SOURCE_DIR}/plugins/${fn_PLUGIN}/server")
+    set(other_covg ",${PROJECT_SOURCE_DIR}/plugins/${fn_PLUGIN}/${fn_PACKAGE}")
     set(test_file "${PROJECT_SOURCE_DIR}/plugins/${fn_PLUGIN}/plugin_tests/${case}_test.py")
   else()
     set(module tests.cases.${case}_test)
@@ -161,18 +148,5 @@ function(add_python_test case)
     girder_ExternalData_add_target("${name}_data")
   endif()
 
-  set_property(TEST ${name} PROPERTY LABELS girder_python)
-endfunction()
-
-function(add_pytest_test case)
-  set(name "server_pytest_${case}")
-
-  add_test(
-    NAME ${name}
-    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    COMMAND "${PYTEST_EXECUTABLE}" --tb=long --cov-append
-  )
-  set_property(TEST ${name} APPEND PROPERTY DEPENDS py_coverage_reset)
-  set_property(TEST py_coverage_combine APPEND PROPERTY DEPENDS ${name})
   set_property(TEST ${name} PROPERTY LABELS girder_python)
 endfunction()

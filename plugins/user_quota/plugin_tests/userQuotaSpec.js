@@ -193,7 +193,7 @@ describe('test the user quota plugin', function () {
         });
         girderTest.waitForLoad();
         waitsFor(function () {
-            return $('input.g-plugin-switch[key="user_quota"]').length > 0;
+            return $('.g-plugin-list-item[data-name="user_quota"]').length > 0;
         }, 'the plugins page to load');
         runs(function () {
             expect($('.g-plugin-config-link[g-route="plugins/user_quota/config"]').length > 0);
@@ -218,7 +218,7 @@ describe('test the user quota plugin', function () {
             var resp = girder.rest.restRequest({
                 url: 'system/setting',
                 method: 'GET',
-                data: {key: 'user_quota.default_user_quota'},
+                data: { key: 'user_quota.default_user_quota' },
                 async: false
             });
             return resp.responseText === '512000';
@@ -359,7 +359,7 @@ describe('test the user quota plugin', function () {
         });
         girderTest.waitForLoad();
         waitsFor(function () {
-            return $('input.g-plugin-switch[key="user_quota"]').length > 0;
+            return $('.g-plugin-list-item[data-name="user_quota"]').length > 0;
         }, 'the plugins page to load');
         runs(function () {
             expect($('.g-plugin-config-link[g-route="plugins/user_quota/config"]').length > 0);
@@ -377,7 +377,7 @@ describe('test the user quota plugin', function () {
             var resp = girder.rest.restRequest({
                 url: 'system/setting',
                 method: 'GET',
-                data: {key: 'user_quota.default_collection_quota'},
+                data: { key: 'user_quota.default_collection_quota' },
                 async: false
             });
             return resp.responseText === '256000';

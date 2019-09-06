@@ -1,30 +1,15 @@
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import itertools
 import os
 import re
 import six
 
+from cherrypy._cpreqbody import Part
+
 from girder.api.rest import setResponseHeader, setContentDisposition
-from girder.constants import SettingKey
-from girder.exceptions import GirderException, ValidationException
+from girder.exceptions import GirderException, ValidationException, FilePathException
 from girder.models.setting import Setting
+from girder.settings import SettingKey
 from girder.utility import progress, RequestBodyStream
-from .model_importer import ModelImporter
 
 
 class FileHandle(object):
@@ -44,6 +29,7 @@ class FileHandle(object):
     :param adapter: The assetstore adapter corresponding to this file.
     :type adapter: girder.utility.abstract_assetstore_adapter.AbstractAssetstoreAdapter
     """
+
     def __init__(self, file, adapter):
         self._file = file
         self._adapter = adapter
@@ -122,10 +108,11 @@ class FileHandle(object):
         pass
 
 
-class AbstractAssetstoreAdapter(ModelImporter):
+class AbstractAssetstoreAdapter(object):
     """
     This defines the interface to be used by all assetstore adapters.
     """
+
     def __init__(self, assetstore):
         self.assetstore = assetstore
 
@@ -316,9 +303,9 @@ class AbstractAssetstoreAdapter(ModelImporter):
         :type chunk: a file-like object or a string
         :returns: the length of the chunk if known, or None.
         """
-        if isinstance(chunk, (six.BytesIO, RequestBodyStream)):
+        if isinstance(chunk, (six.BytesIO, RequestBodyStream, Part)):
             return
-        elif hasattr(chunk, "fileno"):
+        elif hasattr(chunk, 'fileno'):
             return os.fstat(chunk.fileno()).st_size
         elif isinstance(chunk, six.text_type):
             return len(chunk.encode('utf8'))
@@ -368,8 +355,8 @@ class AbstractAssetstoreAdapter(ModelImporter):
             return
         if upload['received'] + chunkSize > upload['size']:
             raise ValidationException('Received too many bytes.')
-        if (upload['received'] + chunkSize != upload['size'] and
-                chunkSize < Setting().get(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE)):
+        if (upload['received'] + chunkSize != upload['size']
+                and chunkSize < Setting().get(SettingKey.UPLOAD_MINIMUM_CHUNK_SIZE)):
             raise ValidationException('Chunk is smaller than the minimum size.')
 
     def cancelUpload(self, upload):
@@ -440,3 +427,15 @@ class AbstractAssetstoreAdapter(ModelImporter):
         :rtype: FileHandle
         """
         return FileHandle(file, self)
+
+    def getLocalFilePath(self, file):
+        """
+        If an assetstore adapter supports it, return a path to the file on the
+        local file system.  Otherwise, raise an exception.
+
+        :param file: The file document.
+        :type file: dict
+        :returns: a local path to the file.
+        :rtype: str
+        """
+        raise FilePathException('This assetstore does not expose file paths')

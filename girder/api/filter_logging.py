@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-#############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-#############################################################################
-
 import cherrypy
 import logging
 import re
@@ -32,24 +14,25 @@ class RegexLoggingFilter(logging.Filter):
     Check log messages against a list of compiled regular expressions.  If any
     of them match, throttle logs.
     """
+
     def filter(self, record):
-        if getattr(record, 'logging.filtered', None) is not None:
-            return getattr(record, 'logging.filtered')
-        setattr(record, 'logging.filtered', True)
+        if getattr(record, '_logging_filter', None) is not None:
+            return record._logging_filter
+        record._logging_filter = True
         msg = record.getMessage()
         for filter in LoggingFilters:
             if filter['re'].search(msg):
                 filter['count'] += 1
-                if ((filter['frequency'] and
-                        filter['count'] >= filter['frequency']) or
-                        (filter['duration'] and
-                         time.time() - filter.get('timestamp', 0) > filter['duration'])):
+                if ((filter['frequency']
+                        and filter['count'] >= filter['frequency'])
+                        or (filter['duration']
+                            and time.time() - filter.get('timestamp', 0) > filter['duration'])):
                     if filter['count'] > 1:
                         record.msg += ' (%d similar messages)' % filter['count']
                     filter['count'] = 0
                     filter['timestamp'] = time.time()
                     return True
-                setattr(record, 'logging.filtered', False)
+                record._logging_filter = False
                 return False
         return True
 

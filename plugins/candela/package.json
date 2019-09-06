@@ -1,8 +1,0 @@
-{
-    "name": "candela-plugin",
-    "version": "0.1.0",
-    "dependencies": {
-        "candela": "~0.16.0",
-        "datalib": "~1.7"
-    }
-}

@@ -1,35 +1,20 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2015 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import json
 import os
 
 from tests import base
-from girder.constants import AssetstoreType, SettingKey
+from girder.constants import AssetstoreType
 from girder.exceptions import ValidationException
 from girder.models.assetstore import Assetstore
 from girder.models.collection import Collection
 from girder.models.folder import Folder
 from girder.models.setting import Setting
 from girder.models.user import User
+from girder.settings import SettingKey
 from girder.utility.system import formatSize
+
+from girder_user_quota.settings import PluginSettings
 
 
 def setUpModule():
@@ -85,8 +70,8 @@ class QuotaTestCase(base.TestCase):
         :param size: size of the file to upload
         :param error: if set, expect this error.
         :param partial: if set, return before uploading the data.  This returns
-                        a kwargs for multipartRequest so that the caller can
-                        finishe the upload later.
+                        a kwargs for self.request so that the caller can
+                        finish the upload later.
         :returns: file: the created file object
         """
         if parentType != 'file':
@@ -120,24 +105,30 @@ class QuotaTestCase(base.TestCase):
         contents = os.urandom(size)
         self.assertStatusOk(resp)
         upload = resp.json
-        fields = [('offset', 0), ('uploadId', upload['_id'])]
-        if not partial:
-            files = [('chunk', name, contents)]
+        if partial:
+            body = contents[:-1]
         else:
-            files = [('chunk', name, contents[:-1])]
-        resp = self.multipartRequest(path='/file/chunk', user=self.admin,
-                                     fields=fields, files=files)
+            body = contents
+
+        resp = self.request(path='/file/chunk', method='POST', user=self.admin, body=body, params={
+            'uploadId': upload['_id']
+        }, type='application/octet-stream')
         self.assertStatusOk(resp)
         if partial:
-            fields = [('offset', len(contents)-1), ('uploadId', upload['_id'])]
-            files = [('chunk', name, contents[-1:])]
-            kwargs = {'path': '/file/chunk', 'user': self.admin,
-                      'fields': fields, 'files': files}
-            return kwargs
+            return {
+                'path': '/file/chunk',
+                'method': 'POST',
+                'user': self.admin,
+                'body': contents[-1:],
+                'type': 'application/octet-stream',
+                'params': {
+                    'offset': len(contents) - 1,
+                    'uploadId': upload['_id']
+                }
+            }
         return resp.json
 
-    def _setPolicy(self, policy, model, resource, user, error=None,
-                   results=None):
+    def _setPolicy(self, policy, model, resource, user, error=None, results=None):
         """
         Set the quota or assetstore policy and check that it was set.
 
@@ -183,12 +174,10 @@ class QuotaTestCase(base.TestCase):
                         matches this.
         :param error: if set, this is a substring expected in an error message.
         """
-        from girder.plugins.user_quota import constants
-
         if model == 'user':
-            key = constants.PluginSettings.QUOTA_DEFAULT_USER_QUOTA
+            key = PluginSettings.DEFAULT_USER_QUOTA
         elif model == 'collection':
-            key = constants.PluginSettings.QUOTA_DEFAULT_COLLECTION_QUOTA
+            key = PluginSettings.DEFAULT_COLLECTION_QUOTA
         try:
             Setting().set(key, value)
         except ValidationException as err:
@@ -197,7 +186,7 @@ class QuotaTestCase(base.TestCase):
             if error not in err.args[0]:
                 raise
             return
-        if testVal is not '__NOCHECK__':
+        if testVal != '__NOCHECK__':
             newVal = Setting().get(key)
             self.assertEqual(newVal, testVal)
 
@@ -286,10 +275,10 @@ class QuotaTestCase(base.TestCase):
                                        partial=True)
         file2kwargs = self._uploadFile('Second partial', folder, size=768,
                                        partial=True)
-        resp = self.multipartRequest(**file1kwargs)
+        resp = self.request(**file1kwargs)
         self.assertStatusOk(resp)
         try:
-            resp = self.multipartRequest(**file2kwargs)
+            resp = self.request(**file2kwargs)
             self.assertStatus(resp, 400)
         except AssertionError as exc:
             self.assertTrue('Upload exceeded' in exc.args[0])
@@ -314,11 +303,11 @@ class QuotaTestCase(base.TestCase):
                          validationError='Upload would exceed file storage quota')
         # Set a policy with a large quota to test using NumberLong in the
         # mongo settings.
-        self._setQuotaDefault(model, 5*1024**3)
+        self._setQuotaDefault(model, 5 * 1024**3)
         # A small file should now upload
         file = self._uploadFile('Six upload', folder, size=2048)
         # But a huge one will fail
-        self._uploadFile('File too large', folder, size=6*1024**3,
+        self._uploadFile('File too large', folder, size=6 * 1024**3,
                          validationError='Upload would exceed file storage quota')
 
     def testAssetstorePolicy(self):
@@ -355,14 +344,14 @@ class QuotaTestCase(base.TestCase):
         self.currentAssetstore = assetstores[0]
         self.alternateAssetstore = assetstores[1]
         self.brokenAssetstore = assetstores[2]
-        self._testAssetstores('user', self.user, self.user)
+        self._testAssetstores('user', self.user, self.admin)
         self._testAssetstores('collection', self.collection, self.admin)
 
     def testQuotaPolicy(self):
         """
         Test quota policies for a user and a collection.
         """
-        self._testQuota('user', self.user, self.user)
+        self._testQuota('user', self.user, self.admin)
         self._testQuota('collection', self.collection, self.admin)
 
     def testPolicySettings(self):
@@ -372,62 +361,62 @@ class QuotaTestCase(base.TestCase):
         # We have to send a json dictionary
         # We can only set certain keys
         self._setPolicy('this is not json',
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Parameter policy must be valid JSON.')
         self._setPolicy(json.dumps(['this is not a dictionary']),
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Parameter policy must be a JSON object.')
         # We can only set certain keys
         self._setPolicy({'notAKey': 'notAValue'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='not a valid quota policy key')
         # We need to pass None, current, or an ObjectId to preferredAssetstore
         self._setPolicy({'preferredAssetstore': 'current'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         results={'preferredAssetstore': None})
         self._setPolicy({'preferredAssetstore': 'not an id'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Invalid preferredAssetstore')
         self._setPolicy({'preferredAssetstore': None},
-                        'user', self.user, self.user)
+                        'user', self.user, self.admin)
         # fallbackAssetstore can also take 'none'
         self._setPolicy({'fallbackAssetstore': 'current'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         results={'fallbackAssetstore': None})
         self._setPolicy({'fallbackAssetstore': 'none'},
-                        'user', self.user, self.user)
+                        'user', self.user, self.admin)
         self._setPolicy({'fallbackAssetstore': 'not an id'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Invalid fallbackAssetstore')
         self._setPolicy({'fallbackAssetstore': None},
-                        'user', self.user, self.user)
+                        'user', self.user, self.admin)
         # fileSizeQuota can be None, blank, 0, or a positive integer
         self._setPolicy({'fileSizeQuota': 0},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         results={'fileSizeQuota': None})
         self._setPolicy({'fileSizeQuota': '00'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         results={'fileSizeQuota': None})
         self._setPolicy({'fileSizeQuota': ''},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         results={'fileSizeQuota': None})
         self._setPolicy({'fileSizeQuota': 'not an integer'},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Invalid quota')
         self._setPolicy({'fileSizeQuota': -1},
-                        'user', self.user, self.user,
+                        'user', self.user, self.admin,
                         error='Invalid quota')
         self._setPolicy({'fileSizeQuota': None},
-                        'user', self.user, self.user)
+                        'user', self.user, self.admin)
         # useDefaultQuota can be True, False, None, yes, no, 0, 1.
         valdict = {None: True, True: True, 'true': True, 1: True, 'True': True,
                    False: False, 'false': False, 0: False, 'False': False}
         for val in valdict:
             self._setPolicy({'useQuotaDefault': val},
-                            'user', self.user, self.user,
+                            'user', self.user, self.admin,
                             results={'useQuotaDefault': valdict[val]})
         self._setPolicy({'useQuotaDefault': 'not_a_boolean'}, 'user',
-                        self.user, self.user, error='Invalid useQuotaDefault')
+                        self.user, self.admin, error='Invalid useQuotaDefault')
         # the resource default values behave like fileSizeQuota
         self._setQuotaDefault('user', 0, None)
         self._setQuotaDefault('user', '00', None)

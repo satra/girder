@@ -1,35 +1,19 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 from ..describe import Description, autoDescribeRoute
 from ..rest import Resource, filtermodel
 from girder.api import access
-from girder.constants import AccessType, SettingKey
+from girder.constants import AccessType
 from girder.exceptions import AccessException
 from girder.models.group import Group as GroupModel
 from girder.models.setting import Setting
 from girder.models.user import User
+from girder.settings import SettingKey
 from girder.utility import mail_utils
 
 
 class Group(Resource):
     """API Endpoint for groups."""
+
     def __init__(self):
         super(Group, self).__init__()
         self.resourceName = 'group'
@@ -73,7 +57,7 @@ class Group(Resource):
         else:
             groupList = self._model.list(
                 user=user, offset=offset, limit=limit, sort=sort)
-        return list(groupList)
+        return groupList
 
     @access.user
     @filtermodel(model=GroupModel)
@@ -133,7 +117,7 @@ class Group(Resource):
         .errorResponse('Read access was denied for the group.', 403)
     )
     def getGroupInvitations(self, group, limit, offset, sort):
-        return list(self._model.getInvites(group, limit, offset, sort))
+        return self._model.getInvites(group, limit, offset, sort)
 
     @access.user
     @filtermodel(model=GroupModel)
@@ -192,7 +176,7 @@ class Group(Resource):
         .errorResponse('Read access was denied for the group.', 403)
     )
     def listMembers(self, group, limit, offset, sort):
-        return list(self._model.listMembers(group, offset=offset, limit=limit, sort=sort))
+        return self._model.listMembers(group, offset=offset, limit=limit, sort=sort)
 
     @access.user
     @filtermodel(model=GroupModel, addFields={'access', 'requests'})
@@ -227,14 +211,14 @@ class Group(Resource):
                 if addGroup not in ['no', 'yesadmin', 'yesmod']:
                     addGroup = addPolicy
                 if (groupModel.hasAccess(
-                        group, user, AccessType.ADMIN) and
-                        ('mod' in addPolicy or 'admin' in addPolicy) and
-                        addGroup.startswith('yes')):
+                        group, user, AccessType.ADMIN)
+                        and ('mod' in addPolicy or 'admin' in addPolicy)
+                        and addGroup.startswith('yes')):
                     mustBeAdmin = False
                 elif (groupModel.hasAccess(
-                        group, user, AccessType.WRITE) and
-                        'mod' in addPolicy and
-                        addGroup == 'yesmod'):
+                        group, user, AccessType.WRITE)
+                        and 'mod' in addPolicy
+                        and addGroup == 'yesmod'):
                     mustBeAdmin = False
                 if mustBeAdmin:
                     self.requireAdmin(user)
@@ -250,10 +234,10 @@ class Group(Resource):
                     'user': user,
                     'group': group
                 })
-                mail_utils.sendEmail(
-                    to=userToInvite['email'], text=html,
-                    subject="%s: You've been invited to a group"
-                    % Setting().get(SettingKey.BRAND_NAME)
+                mail_utils.sendMail(
+                    "%s: You've been invited to a group" % Setting().get(SettingKey.BRAND_NAME),
+                    html,
+                    [userToInvite['email']]
                 )
 
         group['access'] = groupModel.getFullAccessList(group)

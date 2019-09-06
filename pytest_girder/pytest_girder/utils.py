@@ -1,6 +1,7 @@
 import asyncore
 import base64
 import cherrypy
+import contextlib
 import email
 import errno
 import json
@@ -141,7 +142,7 @@ def request(path='/', method='GET', params=None, user=None,
             prefix='/api/v1', isJson=True, basicAuth=None, body=None,
             type=None, exception=False, cookie=None, token=None,
             additionalHeaders=None, useHttps=False,
-            authHeader='Girder-Authorization', appPrefix=''):
+            authHeader='Authorization', appPrefix=''):
     """
     Make an HTTP request.
 
@@ -182,7 +183,10 @@ def request(path='/', method='GET', params=None, user=None,
         body = body.encode('utf8')
 
     if params:
-        qs = urllib.parse.urlencode(params)
+        # Python2 can't urlencode unicode and this does no harm in Python3
+        qs = urllib.parse.urlencode({
+            k: v.encode('utf8') if isinstance(v, six.text_type) else v
+            for k, v in params.items()})
 
     if params and body:
         # In this case, we are forced to send params in query string
@@ -223,7 +227,7 @@ def request(path='/', method='GET', params=None, user=None,
             raise AssertionError('Did not receive JSON response')
 
     if not exception and response.output_status.startswith(b'500'):
-        raise AssertionError("Internal server error: %s" %
+        raise AssertionError('Internal server error: %s' %
                              getResponseBody(response))
 
     return response
@@ -250,3 +254,96 @@ def buildHeaders(headers, cookie, user, token, basicAuth, authHeader):
         headers.append((authHeader, 'Basic %s' % auth.decode()))
 
     return headers
+
+
+def uploadFile(name, contents, user, parent, parentType='folder',
+               mimeType=None):
+    """
+    Upload a file.
+
+    :param name: The name of the file.
+    :type name: str
+    :param contents: The file contents
+    :type contents: str
+    :param user: The user performing the upload.
+    :type user: dict
+    :param parent: The parent document.
+    :type parent: dict
+    :param parentType: The type of the parent ("folder" or "item")
+    :type parentType: str
+    :param mimeType: Explicit MIME type to set on the file.
+    :type mimeType: str
+    :returns: The file that was created.
+    :rtype: dict
+    """
+    mimeType = mimeType or 'application/octet-stream'
+    upload = request(path='/file', method='POST', user=user,
+                     params={
+                         'parentType': parentType,
+                         'parentId': str(parent['_id']),
+                         'name': name,
+                         'size': len(contents),
+                         'mimeType': mimeType
+                     })
+
+    resp = request(path='/file/chunk', method='POST', user=user,
+                   body=contents,
+                   params={
+                       'uploadId': upload.json['_id'],
+                       'offset': 0
+                   },
+                   type='text/plain')
+
+    return resp.json
+
+
+def _findFreePort():
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind(('', 0))
+        return sock.getsockname()[1]
+
+
+@contextlib.contextmanager
+def serverContext(plugins=None, bindPort=False):
+    # The event daemon cannot be restarted since it is a threading.Thread
+    # object, however all references to girder.events.daemon are a singular
+    # global daemon due to its side effect on import. We have to hack around
+    # this by creating a unique event daemon each time we startup the server
+    # and assigning it to the global.
+    import girder.events
+    from girder.api import docs
+    from girder.utility.server import setup as setupServer
+    from girder.constants import ServerMode
+
+    girder.events.daemon = girder.events.AsyncEventsThread()
+
+    if plugins is None:
+        # By default, pass "[]" to "plugins", disabling any installed plugins
+        plugins = []
+    server = setupServer(mode=ServerMode.TESTING, plugins=plugins)
+    server.request = request
+    server.uploadFile = uploadFile
+    cherrypy.server.unsubscribe()
+    if bindPort:
+        cherrypy.server.subscribe()
+        port = _findFreePort()
+        cherrypy.config['server.socket_port'] = port
+        server.boundPort = port
+        # This is needed if cherrypy started once on another port
+        cherrypy.server.socket_port = port
+    cherrypy.config.update({'environment': 'embedded',
+                            'log.screen': False,
+                            'request.throw_errors': True})
+    cherrypy.engine.start()
+
+    try:
+        yield server
+    finally:
+        cherrypy.engine.unsubscribe('start', girder.events.daemon.start)
+        cherrypy.engine.unsubscribe('stop', girder.events.daemon.stop)
+        cherrypy.engine.stop()
+        cherrypy.engine.exit()
+        cherrypy.tree.apps = {}
+        # This is needed to allow cherrypy to restart on another port
+        cherrypy.server.httpserver = None
+        docs.routes.clear()

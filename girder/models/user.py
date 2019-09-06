@@ -1,31 +1,19 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import os
 import re
+from passlib.context import CryptContext
+from passlib.totp import TOTP, TokenError
+import six
 
 from .model_base import AccessControlledModel
+from .setting import Setting
 from girder import events
-from girder.constants import AccessType, CoreEventHandler, SettingKey, TokenScope
+from girder.constants import AccessType, CoreEventHandler, TokenScope
 from girder.exceptions import AccessException, ValidationException
+from girder.settings import SettingKey
 from girder.utility import config, mail_utils
+from girder.utility._cache import rateLimitBuffer
 
 
 class User(AccessControlledModel):
@@ -53,6 +41,16 @@ class User(AccessControlledModel):
             'size', 'email', 'groups', 'groupInvites', 'status',
             'emailVerified'))
 
+        # To ensure compatibility with authenticator apps, other defaults shouldn't be changed
+        self._TotpFactory = TOTP.using(
+            # An application secret could be set here, if it existed
+            wallet=None
+        )
+
+        self._cryptContext = CryptContext(
+            schemes=['bcrypt']
+        )
+
         events.bind('model.user.save.created',
                     CoreEventHandler.USER_SELF_ACCESS, self._grantSelfAccess)
         events.bind('model.user.save.created',
@@ -68,8 +66,6 @@ class User(AccessControlledModel):
         doc['firstName'] = doc.get('firstName', '').strip()
         doc['lastName'] = doc.get('lastName', '').strip()
         doc['status'] = doc.get('status', 'enabled')
-
-        cur_config = config.getConfig()
 
         if 'salt' not in doc:
             # Internal error, this should not happen
@@ -87,16 +83,13 @@ class User(AccessControlledModel):
             raise ValidationException(
                 'Status must be pending, enabled, or disabled.', 'status')
 
-        if '@' in doc['login']:
-            # Hard-code this constraint so we can always easily distinguish
-            # an email address from a login
-            raise ValidationException('Login may not contain "@".', 'login')
+        if 'hashAlg' in doc:
+            # This is a legacy field; hash algorithms are now inline with the password hash
+            del doc['hashAlg']
 
-        if not re.match(cur_config['users']['login_regex'], doc['login']):
-            raise ValidationException(
-                cur_config['users']['login_description'], 'login')
+        self._validateLogin(doc['login'])
 
-        if not re.match(cur_config['users']['email_regex'], doc['email']):
+        if not mail_utils.validateEmailAddress(doc['email']):
             raise ValidationException('Invalid email address.', 'email')
 
         # Ensure unique logins
@@ -127,7 +120,27 @@ class User(AccessControlledModel):
 
         return doc
 
-    def authenticate(self, login, password):
+    def _validateLogin(self, login):
+        if '@' in login:
+            # Hard-code this constraint so we can always easily distinguish
+            # an email address from a login
+            raise ValidationException('Login may not contain "@".', 'login')
+
+        if not re.match(r'^[a-z][\da-z\-\.]{3,}$', login):
+            raise ValidationException(
+                'Login must be at least 4 characters, start with a letter, and may only contain '
+                'letters, numbers, dashes, and dots.', 'login')
+
+    def filter(self, doc, user, additionalKeys=None):
+        filteredDoc = super(User, self).filter(doc, user, additionalKeys)
+
+        level = self.getAccessLevel(doc, user)
+        if level >= AccessType.ADMIN:
+            filteredDoc['otp'] = doc.get('otp', {}).get('enabled', False)
+
+        return filteredDoc
+
+    def authenticate(self, login, password, otpToken=None):
         """
         Validate a user login via username and password. If authentication fails,
         a ``AccessException`` is raised.
@@ -136,11 +149,12 @@ class User(AccessControlledModel):
         :type login: str
         :param password: The user's password.
         :type password: str
+        :param otpToken: A one-time password for the user. If "True", then the one-time password
+                         (if required) is assumed to be concatenated to the password.
+        :type otpToken: str or bool or None
         :returns: The corresponding user if the login was successful.
         :rtype: dict
         """
-        from .password import Password
-
         event = events.trigger('model.user.authenticate', {
             'login': login,
             'password': password
@@ -156,8 +170,40 @@ class User(AccessControlledModel):
         if user is None:
             raise AccessException('Login failed.')
 
-        if not Password().authenticate(user, password):
+        # Handle users with no password
+        if not self.hasPassword(user):
+            e = events.trigger('no_password_login_attempt', {
+                'user': user,
+                'password': password
+            })
+
+            if len(e.responses):
+                return e.responses[-1]
+
+            raise ValidationException(
+                'This user does not have a password. You must log in with an '
+                'external service, or reset your password.')
+
+        # Handle OTP token concatenation
+        if otpToken is True and self.hasOtpEnabled(user):
+            # Assume the last (typically 6) characters are the OTP, so split at that point
+            otpTokenLength = self._TotpFactory.digits
+            otpToken = password[-otpTokenLength:]
+            password = password[:-otpTokenLength]
+
+        # Verify password
+        if not self._cryptContext.verify(password, user['salt']):
             raise AccessException('Login failed.')
+
+        # Verify OTP
+        if self.hasOtpEnabled(user):
+            if otpToken is None:
+                raise AccessException(
+                    'User authentication must include a one-time password '
+                    '(typically in the "Girder-OTP" header).')
+            self.verifyOtp(user, otpToken)
+        elif isinstance(otpToken, six.string_types):
+            raise AccessException('The user has not enabled one-time passwords.')
 
         # This has the same behavior as User.canLogin, but returns more
         # detailed error messages
@@ -241,6 +287,18 @@ class User(AccessControlledModel):
             cursor=cursor, user=user, level=AccessType.READ, limit=limit,
             offset=offset)
 
+    def hasPassword(self, user):
+        """
+        Returns whether or not the given user has a password stored in the
+        database. If not, it is expected that the user will be authenticated by
+        an external service.
+
+        :param user: The user to test.
+        :type user: dict
+        :returns: bool
+        """
+        return user['salt'] is not None
+
     def setPassword(self, user, password, save=True):
         """
         Change a user's password.
@@ -251,16 +309,76 @@ class User(AccessControlledModel):
                          where an external system is responsible for
                          authenticating the user.
         """
-        from .password import Password
         if password is None:
             user['salt'] = None
         else:
-            salt, alg = Password().encryptAndStore(password)
-            user['salt'] = salt
-            user['hashAlg'] = alg
+            cur_config = config.getConfig()
+
+            # Normally this would go in validate() but password is a special case.
+            if not re.match(cur_config['users']['password_regex'], password):
+                raise ValidationException(cur_config['users']['password_description'], 'password')
+
+            user['salt'] = self._cryptContext.hash(password)
 
         if save:
             self.save(user)
+
+    def initializeOtp(self, user):
+        """
+        Initialize the use of one-time passwords with this user.
+
+        This does not save the modified user model.
+
+        :param user: The user to modify.
+        :return: The new OTP keys, each in KeyUriFormat.
+        :rtype: dict
+        """
+        totp = self._TotpFactory.new()
+
+        user['otp'] = {
+            'enabled': False,
+            'totp': totp.to_dict()
+        }
+
+        # Use the brand name as the OTP issuer if it's non-default (since that's prettier and more
+        # meaningful for users), but fallback to the site hostname if the brand name isn't set
+        # (to disambiguate otherwise identical "Girder" issuers)
+        # Prevent circular import
+        from girder.api.rest import getUrlParts
+        brandName = Setting().get(SettingKey.BRAND_NAME)
+        defaultBrandName = Setting().getDefault(SettingKey.BRAND_NAME)
+        # OTP URIs ( https://github.com/google/google-authenticator/wiki/Key-Uri-Format ) do not
+        # allow colons, so use only the hostname component
+        serverHostname = getUrlParts().netloc.partition(':')[0]
+        # Normally, the issuer would be set when "self._TotpFactory" is instantiated, but that
+        # happens during model initialization, when there's no current request, so the server
+        # hostname is not known then
+        otpIssuer = brandName if brandName != defaultBrandName else serverHostname
+
+        return {
+            'totpUri': totp.to_uri(label=user['login'], issuer=otpIssuer)
+        }
+
+    def hasOtpEnabled(self, user):
+        return 'otp' in user and user['otp']['enabled']
+
+    def verifyOtp(self, user, otpToken):
+        lastCounterKey = 'girder.models.user.%s.otp.totp.counter' % user['_id']
+
+        # The last successfully-authenticated key (which is blacklisted from reuse)
+        lastCounter = rateLimitBuffer.get(lastCounterKey) or None
+
+        try:
+            totpMatch = self._TotpFactory.verify(
+                otpToken, user['otp']['totp'], last_counter=lastCounter)
+        except TokenError as e:
+            raise AccessException('One-time password validation failed: %s' % e)
+
+        # The totpMatch.cache_seconds tells us prospectively how long the counter needs to be cached
+        # for, but dogpile.cache expiration times work retrospectively (on "get"), so there's no
+        # point to using it (over-caching just wastes cache resources, but does not impact
+        # "totp.verify" security)
+        rateLimitBuffer.set(lastCounterKey, totpMatch.counter)
 
     def createUser(self, login, password, firstName, lastName, email,
                    admin=False, public=False):
@@ -326,8 +444,8 @@ class User(AccessControlledModel):
         yet verified their email address.
         """
         from .setting import Setting
-        return (not user['emailVerified']) and Setting().get(
-            SettingKey.EMAIL_VERIFICATION) == 'required'
+        return (not user['emailVerified']) and \
+            Setting().get(SettingKey.EMAIL_VERIFICATION) == 'required'
 
     def adminApprovalRequired(self, user):
         """
@@ -345,20 +463,19 @@ class User(AccessControlledModel):
             'user': user,
             'url': url
         })
-        mail_utils.sendEmail(
-            toAdmins=True,
-            subject='Girder: Account pending approval',
-            text=text)
+        mail_utils.sendMailToAdmins(
+            'Girder: Account pending approval',
+            text)
 
     def _sendApprovedEmail(self, user):
         text = mail_utils.renderTemplate('accountApproved.mako', {
             'user': user,
             'url': mail_utils.getEmailUrlPrefix()
         })
-        mail_utils.sendEmail(
-            to=user.get('email'),
-            subject='Girder: Account approved',
-            text=text)
+        mail_utils.sendMail(
+            'Girder: Account approved',
+            text,
+            [user.get('email')])
 
     def _sendVerificationEmail(self, user):
         from .token import Token
@@ -370,10 +487,10 @@ class User(AccessControlledModel):
         text = mail_utils.renderTemplate('emailVerification.mako', {
             'url': url
         })
-        mail_utils.sendEmail(
-            to=user.get('email'),
-            subject='Girder: Email verification',
-            text=text)
+        mail_utils.sendMail(
+            'Girder: Email verification',
+            text,
+            [user.get('email')])
 
     def _grantSelfAccess(self, event):
         """
@@ -397,7 +514,7 @@ class User(AccessControlledModel):
         from .folder import Folder
         from .setting import Setting
 
-        if Setting().get(SettingKey.USER_DEFAULT_FOLDERS, 'public_private') == 'public_private':
+        if Setting().get(SettingKey.USER_DEFAULT_FOLDERS) == 'public_private':
             user = event.info
 
             publicFolder = Folder().createFolder(
@@ -435,7 +552,12 @@ class User(AccessControlledModel):
         if subpath:
             path = os.path.join(path, doc['login'])
         folderModel = Folder()
-        for folder in folderModel.childFolders(parentType='user', parent=doc, user=user):
+        # Eagerly evaluate this list, as the MongoDB cursor can time out on long requests
+        childFolders = list(folderModel.childFolders(
+            parentType='user', parent=doc, user=user,
+            fields=['name'] + (['meta'] if includeMetadata else [])
+        ))
+        for folder in childFolders:
             for (filepath, file) in folderModel.fileList(
                     folder, user, path, includeMetadata, subpath=True, data=data):
                 yield (filepath, file)
@@ -456,14 +578,10 @@ class User(AccessControlledModel):
 
         count = 1
         folderModel = Folder()
-        folders = folderModel.find({
+        folders = folderModel.findWithPermissions({
             'parentId': doc['_id'],
             'parentCollection': 'user'
-        }, fields=('access',))
-
-        if level is not None:
-            folders = self.filterResultsByPermission(
-                cursor=folders, user=user, level=level)
+        }, fields='access', user=user, level=level)
 
         count += sum(folderModel.subtreeCount(
             folder, includeItems=includeItems, user=user, level=level)
@@ -488,16 +606,12 @@ class User(AccessControlledModel):
         fields = () if level is None else ('access', 'public')
 
         folderModel = Folder()
-        folders = folderModel.find({
+        folders = folderModel.findWithPermissions({
             'parentId': user['_id'],
             'parentCollection': 'user'
-        }, fields=fields)
+        }, fields=fields, user=filterUser, level=level)
 
-        if level is None:
-            return folders.count()
-        else:
-            return sum(1 for _ in folderModel.filterResultsByPermission(
-                cursor=folders, user=filterUser, level=level))
+        return folders.count()
 
     def updateSize(self, doc):
         """

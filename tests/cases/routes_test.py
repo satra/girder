@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import os
 import requests
 
@@ -27,7 +9,7 @@ from girder.api.describe import Description, describeRoute
 from girder.api.rest import Resource
 from girder.exceptions import GirderException, RestException
 from girder.models.setting import Setting
-from girder.constants import SettingKey, SettingDefault
+from girder.settings import SettingDefault, SettingKey
 
 testServer = None
 
@@ -73,6 +55,7 @@ class RoutesTestCase(base.TestCase):
     """
     Unit tests of the routing system of REST Resources.
     """
+
     def testRouteSystem(self):
         # Test an empty route handler
         emptyResource = Resource()
@@ -85,7 +68,7 @@ class RoutesTestCase(base.TestCase):
         try:
             dummy.handleRoute('GET', (), {})
         except RestException as e:
-            exc = e.message
+            exc = str(e)
         self.assertEqual(exc, 'No matching route for "GET "')
 
         # Make sure route ordering is correct; literals before wildcard tokens
@@ -132,15 +115,13 @@ class RoutesTestCase(base.TestCase):
         self.assertStatusOk(resp)
         self.assertFalse('Access-Control-Allow-Origin' in resp.headers)
 
-        # If we allow some origins, we should get the corresponding header
+        # Request from a non-allowed Origin
         Setting().set(SettingKey.CORS_ALLOW_ORIGIN, 'http://kitware.com')
         resp = self.request(path='/dummy/test', additionalHeaders=[
             ('Origin', 'http://foo.com')
         ])
-        self.assertEqual(resp.headers['Access-Control-Allow-Origin'],
-                         'http://kitware.com')
-        self.assertEqual(resp.headers['Access-Control-Allow-Credentials'],
-                         'true')
+        self.assertNotIn('Access-Control-Allow-Origin', resp.headers)
+        self.assertEqual(resp.headers['Access-Control-Allow-Credentials'], 'true')
 
         # Simulate a preflight request; we should get back several headers
         Setting().set(SettingKey.CORS_ALLOW_METHODS, 'POST')
@@ -151,10 +132,9 @@ class RoutesTestCase(base.TestCase):
         )
         self.assertStatusOk(resp)
         self.assertEqual(self.getBody(resp), '')
-        self.assertEqual(resp.headers['Access-Control-Allow-Origin'],
-                         'http://kitware.com')
-        self.assertEqual(resp.headers['Access-Control-Allow-Credentials'],
-                         'true')
+
+        self.assertNotIn('Access-Control-Allow-Origin', resp.headers)
+        self.assertEqual(resp.headers['Access-Control-Allow-Credentials'], 'true')
         self.assertEqual(resp.headers['Access-Control-Allow-Headers'],
                          SettingDefault.defaults[SettingKey.CORS_ALLOW_HEADERS])
         self.assertEqual(resp.headers['Access-Control-Allow-Methods'], 'POST')
@@ -178,3 +158,17 @@ class RoutesTestCase(base.TestCase):
                 ('Origin', 'http://invalid.com')
             ], isJson=False)
         self.assertNotIn('Access-Control-Allow-Origin', resp.headers)
+
+        # Test behavior of '*' allowed origin
+        Setting().set(SettingKey.CORS_ALLOW_ORIGIN, 'http://foo.com,*')
+        resp = self.request(
+            path='/dummy/test', method='GET', additionalHeaders=[
+                ('Origin', 'http://bar.com')
+            ], isJson=False)
+        self.assertEqual(resp.headers['Access-Control-Allow-Origin'], '*')
+
+        resp = self.request(
+            path='/dummy/test', method='GET', additionalHeaders=[
+                ('Origin', 'http://foo.com')
+            ], isJson=False)
+        self.assertEqual(resp.headers['Access-Control-Allow-Origin'], 'http://foo.com')

@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 """
 This module is essentially a subset of the python zipfile module that has been
 modified to allow it to read arbitrary streams (using generators) as input,
@@ -118,6 +100,7 @@ class ZipGenerator(object):
     This class can be used to create a streaming zip file that consumes from
     one generator and writes to another.
     """
+
     def __init__(self, rootPath='', compression=STORE):
         """
         :param rootPath: The root path for all files within this archive.
@@ -222,7 +205,7 @@ class ZipGenerator(object):
 
             if extra:
                 extraData = struct.pack(
-                    b'<hh' + b'q'*len(extra), 1, 8*len(extra), *extra)
+                    b'<hh' + b'q' * len(extra), 1, 8 * len(extra), *extra)
                 extractVersion = max(45, header.extractVersion)
                 createVersion = max(45, header.createVersion)
             else:

@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import six
 import time
@@ -28,6 +10,7 @@ class ProgressState(object):
     """
     Enum of possible progress states for progress records.
     """
+
     QUEUED = 'queued'
     ACTIVE = 'active'
     SUCCESS = 'success'
@@ -48,6 +31,7 @@ class Notification(Model):
     time at which the event happened, and an optional expires field indicating
     at what time the notification should be deleted from the database.
     """
+
     def initialize(self):
         self.name = 'notification'
         self.ensureIndices(('userId', 'time', 'updated', 'tokenId'))
@@ -187,24 +171,23 @@ class Notification(Model):
         record['updatedTime'] = time.time()
         if save:
             # Only update the time estimate if we are also saving
-            if (record['updatedTime'] > record['startTime'] and
-                    record['data']['estimateTime']):
+            if (record['updatedTime'] > record['startTime']
+                    and record['data']['estimateTime']):
                 if 'estimatedTotalTime' in record:
                     del record['estimatedTotalTime']
                 try:
                     total = float(record['data']['total'])
                     current = float(record['data']['current'])
                     if total >= current and total > 0 and current > 0:
-                        record['estimatedTotalTime'] = (total * (
-                            record['updatedTime'] - record['startTime']) /
-                            current)
+                        record['estimatedTotalTime'] = \
+                            total * (record['updatedTime'] - record['startTime']) / current
                 except ValueError:
                     pass
             return self.save(record)
         else:
             return record
 
-    def get(self, user, since=None, token=None):
+    def get(self, user, since=None, token=None, sort=None):
         """
         Get outstanding notifications for the given user.
 
@@ -214,6 +197,7 @@ class Notification(Model):
             since a certain timestamp.
         :type since: datetime
         :param token: if the user is None, the token requesting updated.
+        :param sort: Sort field for the database query.
         """
         q = {}
         if user:
@@ -224,4 +208,4 @@ class Notification(Model):
         if since is not None:
             q['updated'] = {'$gt': since}
 
-        return self.find(q)
+        return self.find(q, sort=sort)

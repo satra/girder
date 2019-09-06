@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import json
 import os
 import re
@@ -25,8 +7,8 @@ import cherrypy
 import mako
 
 from girder import constants
-from girder.constants import SettingKey
 from girder.models.setting import Setting
+from girder.settings import SettingKey
 from girder.utility import config
 
 
@@ -36,6 +18,7 @@ class WebrootBase(object):
 
     This will typically be the base class of any non-API endpoints.
     """
+
     exposed = True
 
     def __init__(self, templatePath):
@@ -111,23 +94,21 @@ class Webroot(WebrootBase):
     """
     The webroot endpoint simply serves the main index HTML file.
     """
+
     def __init__(self, templatePath=None):
         if not templatePath:
             templatePath = os.path.join(constants.PACKAGE_DIR, 'utility', 'webroot.mako')
         super(Webroot, self).__init__(templatePath)
 
-        self.vars = {
-            # 'title' is deprecated use brandName instead
-            'title': 'Girder'
-        }
+        self.vars = {}
 
     def _renderHTML(self):
         from girder.utility import server
-        self.vars['plugins'] = server.getPlugins()
+        from girder.plugin import loadedPlugins
+        self.vars['plugins'] = loadedPlugins()
         self.vars['pluginCss'] = []
         self.vars['pluginJs'] = []
-        builtDir = os.path.join(constants.STATIC_ROOT_DIR, 'clients', 'web',
-                                'static', 'built', 'plugins')
+        builtDir = os.path.join(constants.STATIC_ROOT_DIR, 'built', 'plugins')
         for plugin in self.vars['plugins']:
             if os.path.exists(os.path.join(builtDir, plugin, 'plugin.min.css')):
                 self.vars['pluginCss'].append(plugin)
@@ -135,10 +116,10 @@ class Webroot(WebrootBase):
                 self.vars['pluginJs'].append(plugin)
 
         self.vars['apiRoot'] = server.getApiRoot()
-        self.vars['staticRoot'] = server.getStaticRoot()
+        self.vars['staticPublicPath'] = server.getStaticPublicPath()
         self.vars['brandName'] = Setting().get(SettingKey.BRAND_NAME)
-        self.vars['contactEmail'] = Setting().get(
-            SettingKey.CONTACT_EMAIL_ADDRESS)
+        self.vars['contactEmail'] = Setting().get(SettingKey.CONTACT_EMAIL_ADDRESS)
+        self.vars['privacyNoticeHref'] = Setting().get(SettingKey.PRIVACY_NOTICE)
         self.vars['bannerColor'] = Setting().get(SettingKey.BANNER_COLOR)
         self.vars['registrationPolicy'] = Setting().get(SettingKey.REGISTRATION_POLICY)
         self.vars['enablePasswordLogin'] = Setting().get(SettingKey.ENABLE_PASSWORD_LOGIN)

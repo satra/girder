@@ -32,7 +32,7 @@ def tempLog():
     shutil.rmtree(logRoot)
 
 
-def configureLogging(logConfig={}, oneFile=False):
+def configureLogging(logConfig=None, oneFile=False):
     cfg = config.getConfig()
     if oneFile:
         cfg['logging']['error_log_file'] = cfg['logging']['info_log_file']
@@ -42,9 +42,9 @@ def configureLogging(logConfig={}, oneFile=False):
         os.unlink(cfg['logging']['info_log_file'])
     if os.path.exists(cfg['logging']['error_log_file']):
         os.unlink(cfg['logging']['error_log_file'])
-    cfg['logging'].update(logConfig)
+    cfg['logging'].update(logConfig or {})
 
-    girder.logger = girder._setupLogger()
+    girder._attachFileLogHandlers()
 
     return cfg['logging']
 

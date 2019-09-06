@@ -1,31 +1,13 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import six
 from bson.objectid import ObjectId
 
 from girder import events, logger
 from girder.api import rest
-from girder.constants import SettingKey
 from .model_base import Model
 from girder.exceptions import GirderException, ValidationException
+from girder.settings import SettingKey
 from girder.utility import RequestBodyStream
 from girder.utility.progress import noProgress
 
@@ -36,6 +18,7 @@ class Upload(Model):
     but are not yet complete, so that they can be uploaded in chunks of
     arbitrary size. The chunks must be uploaded in order.
     """
+
     def initialize(self):
         self.name = 'upload'
         self.ensureIndex('sha512')
@@ -68,7 +51,8 @@ class Upload(Model):
 
         :param obj: The object representing the content to upload.
         :type obj: file-like
-        :param size: The total size of
+        :param size: The total size of the file.
+        :type size: int
         :param name: The name of the file to create.
         :type name: str
         :param parentType: The type of the parent: "folder" or "item".
@@ -90,12 +74,16 @@ class Upload(Model):
             parentType and parent).  This is intended for files that shouldn't
             appear as direct children of the parent, but are still associated
             with it.
-        :type attach: boolean
+        :type attachParent: boolean
         """
         upload = self.createUpload(
             user=user, name=name, parentType=parentType, parent=parent,
             size=size, mimeType=mimeType, reference=reference,
             assetstore=assetstore, attachParent=attachParent)
+
+        if size == 0:
+            return self.finalizeUpload(upload)
+
         # The greater of 32 MB or the the upload minimum chunk size.
         chunkSize = self._getChunkSize()
 
@@ -104,7 +92,7 @@ class Upload(Model):
             if not data:
                 break
 
-            upload = self.handleChunk(upload, RequestBodyStream(six.BytesIO(data), size))
+            upload = self.handleChunk(upload, RequestBodyStream(six.BytesIO(data), len(data)))
 
         return upload
 
@@ -471,8 +459,8 @@ class Upload(Model):
                             query[key] = id
             if 'minimumAge' in filters:
                 query['updated'] = {
-                    '$lte': datetime.datetime.utcnow() -
-                    datetime.timedelta(days=float(filters['minimumAge']))
+                    '$lte': datetime.datetime.utcnow() - datetime.timedelta(
+                        days=float(filters['minimumAge']))
                     }
         # Perform the find; we'll do access-based filtering of the result
         # set afterward.

@@ -35,6 +35,7 @@ except ImportError:
 EXECUTABLE_MONGO_METHODS = get_methods(pymongo.collection.Collection,
                                        pymongo.database.Database,
                                        pymongo.cursor.Cursor,
+                                       pymongo.command_cursor.CommandCursor,
                                        MongoClient, MongoReplicaSetClient,
                                        pymongo)
 
@@ -65,7 +66,7 @@ class Executable(object):
 
                 # If we get back a cursor, we need to also make sure it tries
                 # to auto-reconnect on failure.
-                if isinstance(val, pymongo.cursor.Cursor):
+                if isinstance(val, (pymongo.cursor.Cursor, pymongo.command_cursor.CommandCursor)):
                     return MongoProxy(val, self.logger, self.wait_time)
                 else:
                     return val
@@ -143,6 +144,15 @@ class MongoProxy(object):
 
     def __iter__(self):
         return self.conn.__iter__()
+
+    # To be recognised as an iterator, 'next" (for Python 2) and "__next__" (for Python 3) must be
+    # present; some of the wrapped PyMongo objects (like Cursor) are iterators; and non-iterator
+    # objects will fail normally when their native methods are called
+    def next(self):
+        return self.conn.next()
+
+    def __next__(self):
+        return self.conn.__next__()
 
     def __str__(self):
         return self.conn.__str__()

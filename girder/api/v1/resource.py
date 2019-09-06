@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import six
 
 from ..describe import Description, autoDescribeRoute
@@ -28,10 +10,11 @@ from girder.utility import parseTimestamp
 from girder.utility.search import getSearchModeHandler
 from girder.utility import ziputil
 from girder.utility import path as path_util
+from girder.utility.model_importer import ModelImporter
 from girder.utility.progress import ProgressContext
 
 # Plugins can modify this set to allow other types to be searched
-allowedSearchTypes = {'collection', 'folder', 'group', 'item', 'user'}
+allowedSearchTypes = {'collection', 'file', 'folder', 'group', 'item', 'user'}
 allowedDeleteTypes = {'collection', 'file', 'folder', 'group', 'item', 'user'}
 
 
@@ -39,6 +22,7 @@ class Resource(BaseResource):
     """
     API Endpoints that deal with operations across multiple resource types.
     """
+
     def __init__(self):
         super(Resource, self).__init__()
         self.resourceName = 'resource'
@@ -112,8 +96,8 @@ class Resource(BaseResource):
         :returns: the loaded model.
         """
         try:
-            model = self.model(kind)
-        except ImportError:
+            model = ModelImporter.model(kind)
+        except Exception:
             model = None
         if not model or (funcName and not hasattr(model, funcName)):
             raise RestException('Invalid resources format.')
@@ -127,16 +111,12 @@ class Resource(BaseResource):
                'path starting with either "/user/[user name]", for a user\'s '
                'resources or "/collection/[collection name]", for resources '
                'under a collection.')
-        .param('test',
-               'Specify whether to return None instead of throwing an '
-               'exception when path doesn\'t exist.',
-               required=False, dataType='boolean', default=False)
         .errorResponse('Path is invalid.')
         .errorResponse('Path refers to a resource that does not exist.')
         .errorResponse('Read access was denied for the resource.', 403)
     )
-    def lookup(self, path, test):
-        return path_util.lookUpPath(path, self.getCurrentUser(), test)['document']
+    def lookup(self, path):
+        return path_util.lookUpPath(path, self.getCurrentUser())['document']
 
     @access.public(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
@@ -154,8 +134,7 @@ class Resource(BaseResource):
             raise RestException('Invalid resource id.')
         return path_util.getResourcePath(type, doc, user=user)
 
-    @access.cookie(force=True)
-    @access.public(scope=TokenScope.DATA_READ)
+    @access.public(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description('Download a set of items, folders, collections, and users '
                     'as a zip archive.')
@@ -196,7 +175,7 @@ class Resource(BaseResource):
         def stream():
             zip = ziputil.ZipGenerator()
             for kind in resources:
-                model = self.model(kind)
+                model = ModelImporter.model(kind)
                 for id in resources[kind]:
                     doc = model.load(id=id, user=user, level=AccessType.READ)
                     for (path, file) in model.fileList(
@@ -292,7 +271,8 @@ class Resource(BaseResource):
 
         if resources.get('item') and parentType != 'folder':
             raise RestException('Invalid parentType.')
-        return self.model(parentType).load(parentId, level=AccessType.WRITE, user=user, exc=True)
+        return ModelImporter.model(parentType).load(
+            parentId, level=AccessType.WRITE, user=user, exc=True)
 
     @access.user(scope=TokenScope.DATA_WRITE)
     @autoDescribeRoute(
@@ -329,8 +309,8 @@ class Resource(BaseResource):
                         if parent['_id'] != doc['folderId']:
                             model.move(doc, parent)
                     elif kind == 'folder':
-                        if ((parentType, parent['_id']) !=
-                                (doc['parentCollection'], doc['parentId'])):
+                        if ((parentType, parent['_id'])
+                                != (doc['parentCollection'], doc['parentId'])):
                             model.move(doc, parent, parentType)
                     ctx.update(increment=1)
 

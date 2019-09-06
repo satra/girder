@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import json
 import six
@@ -57,6 +39,18 @@ class FolderTestCase(base.TestCase):
             'password': 'goodpassword'
         })
         self.admin, self.user = [User().createUser(**user) for user in users]
+
+    def testLegacyFolders(self):
+        folder = Folder().createFolder(
+            parent=self.admin, parentType='user', creator=self.admin,
+            name='LegacyFolder')
+
+        del folder['meta']
+        folder = Folder().save(folder)
+        assert 'meta' not in folder
+
+        folder = Folder().load(folder['_id'], user=self.admin)
+        assert 'meta' in folder
 
     def testChildFolders(self):
         # Test with some bad parameters
@@ -149,6 +143,15 @@ class FolderTestCase(base.TestCase):
         self.assertTrue(resp.json['message'].startswith(
             'Write access denied for user'))
 
+    def testFolderTextSearch(self):
+        resp = self.request(
+            path='/folder', method='GET', user=self.admin, params={
+                'text': 'Public',
+                'sortdir': SortDir.DESCENDING
+            })
+        self.assertStatusOk(resp)
+        self.assertEqual(len(resp.json), 2)
+
     def testCreateFolder(self):
         self.ensureRequiredParams(
             path='/folder', method='POST', required=['name', 'parentId'],
@@ -231,6 +234,7 @@ class FolderTestCase(base.TestCase):
                 'parentId': str(self.admin['_id'])
             })
         self.assertStatus(resp, 200)
+        assert 'meta' in resp.json
 
     def testReuseExisting(self):
         self.ensureRequiredParams(
@@ -476,8 +480,8 @@ class FolderTestCase(base.TestCase):
             self.assertEqual(notifs[0]['data']['message'], 'Done')
             self.assertEqual(notifs[0]['data']['total'], 3)
             self.assertEqual(notifs[0]['data']['current'], 3)
-            self.assertTrue(notifs[0]['expires'] < datetime.datetime.utcnow() +
-                            datetime.timedelta(minutes=1))
+            self.assertTrue(notifs[0]['expires'] < datetime.datetime.utcnow()
+                            + datetime.timedelta(minutes=1))
 
             # Make sure our event handler was called with expected args
             self.assertTrue('kwargs' in cbInfo)
@@ -746,3 +750,15 @@ class FolderTestCase(base.TestCase):
             path='/folder/%s/copy' % subFolder['_id'], method='POST',
             user=self.admin, params={'public': 'false', 'progress': True})
         self.assertStatusOk(resp)
+
+    def testUpdateDuplicatedName(self):
+        folder1 = Folder().createFolder(
+            name='foo', parent=self.admin, parentType='user', creator=self.admin)
+        folder2 = Folder().createFolder(
+            name='bar', parent=self.admin, parentType='user', creator=self.admin)
+        folder2['name'] = 'foo'
+        Folder().save(folder2, validate=False)
+        self.assertEqual(folder2['name'], 'foo')
+        folder1['size'] = 3
+        Folder().save(folder1)
+        self.assertEqual(folder1['name'], 'foo')

@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import base64
 import cherrypy
 import datetime
@@ -24,12 +6,12 @@ import datetime
 from ..describe import Description, autoDescribeRoute
 from girder.api import access
 from girder.api.rest import Resource, filtermodel, setCurrentUser
-from girder.constants import AccessType, SettingKey, TokenScope
+from girder.constants import AccessType, TokenScope
 from girder.exceptions import RestException, AccessException
-from girder.models.password import Password
 from girder.models.setting import Setting
 from girder.models.token import Token
 from girder.models.user import User as UserModel
+from girder.settings import SettingKey
 from girder.utility import mail_utils
 
 
@@ -57,15 +39,18 @@ class User(Resource):
                    self.checkTemporaryPassword)
         self.route('PUT', ('password', 'temporary'),
                    self.generateTemporaryPassword)
+        self.route('POST', (':id', 'otp'), self.initializeOtp)
+        self.route('PUT', (':id', 'otp'), self.finalizeOtp)
+        self.route('DELETE', (':id', 'otp'), self.removeOtp)
         self.route('PUT', (':id', 'verification'), self.verifyEmail)
         self.route('POST', ('verification',), self.sendVerificationEmail)
 
-    @access.public
+    @access.user
     @filtermodel(model=UserModel)
     @autoDescribeRoute(
         Description('List or search for users.')
         .responseClass('User', array=True)
-        .param('text', "Pass this to perform a full text search for items.", required=False)
+        .param('text', 'Pass this to perform a full text search for items.', required=False)
         .pagingParams(defaultSort='lastName')
     )
     def find(self, text, limit, offset, sort):
@@ -98,6 +83,8 @@ class User(Resource):
         Description('Log in to the system.')
         .notes('Pass your username and password using HTTP Basic Auth. Sends'
                ' a cookie that should be passed back in future requests.')
+        .param('Girder-OTP', 'A one-time password for this user', paramType='header',
+               required=False)
         .errorResponse('Missing Authorization header.', 401)
         .errorResponse('Invalid login or password.', 403)
     )
@@ -109,10 +96,10 @@ class User(Resource):
 
         # Only create and send new cookie if user isn't already sending a valid one.
         if not user:
-            authHeader = cherrypy.request.headers.get('Girder-Authorization')
+            authHeader = cherrypy.request.headers.get('Authorization')
 
             if not authHeader:
-                authHeader = cherrypy.request.headers.get('Authorization')
+                authHeader = cherrypy.request.headers.get('Girder-Authorization')
 
             if not authHeader or not authHeader[0:6] == 'Basic ':
                 raise RestException('Use HTTP Basic Authentication', 401)
@@ -125,7 +112,8 @@ class User(Resource):
                 raise RestException('Invalid HTTP Authorization header', 401)
 
             login, password = credentials.split(':', 1)
-            user = self._model.authenticate(login, password)
+            otpToken = cherrypy.request.headers.get('Girder-OTP')
+            user = self._model.authenticate(login, password, otpToken)
 
             setCurrentUser(user)
             token = self.sendAuthTokenCookie(user)
@@ -140,7 +128,7 @@ class User(Resource):
             'message': 'Login succeeded.'
         }
 
-    @access.user
+    @access.public
     @autoDescribeRoute(
         Description('Log out of the system.')
         .responseClass('Token')
@@ -204,13 +192,12 @@ class User(Resource):
         self._model.remove(user)
         return {'message': 'Deleted user %s.' % user['login']}
 
-    @access.admin
+    @access.user
     @autoDescribeRoute(
-        Description('Get detailed information about all users.')
-        .errorResponse('You are not a system administrator.', 403)
+        Description('Get detailed information of accessible users.')
     )
     def getUsersDetails(self):
-        nUsers = self._model.find().count()
+        nUsers = self._model.findWithPermissions(user=self.getCurrentUser()).count()
         return {'nUsers': nUsers}
 
     @access.user
@@ -235,11 +222,11 @@ class User(Resource):
         user['email'] = email
 
         # Only admins can change admin state
-        if admin is True:
+        if admin is not None:
             if self.getCurrentUser()['admin']:
                 user['admin'] = admin
-            elif not user['admin']:
-                raise AccessException('Only admins may enable admin state.')
+            elif user['admin'] is not admin:
+                raise AccessException('Only admins may change admin status.')
 
         # Only admins can change status
         if status is not None and status != user.get('status', 'enabled'):
@@ -254,10 +241,10 @@ class User(Resource):
 
     @access.admin
     @autoDescribeRoute(
-        Description('Change a user\'s password.')
+        Description("Change a user's password.")
         .notes('Only administrators may use this endpoint.')
         .modelParam('id', model=UserModel, level=AccessType.ADMIN)
-        .param('password', 'The user\'s new password.')
+        .param('password', "The user's new password.")
         .errorResponse('You are not an administrator.', 403)
         .errorResponse('The new password is invalid.')
     )
@@ -281,12 +268,13 @@ class User(Resource):
         if not old:
             raise RestException('Old password must not be empty.')
 
-        if not Password().hasPassword(user) or not Password().authenticate(user, old):
+        if (not self._model.hasPassword(user)
+                or not self._model._cryptContext.verify(old, user['salt'])):
             # If not the user's actual password, check for temp access token
             token = Token().load(old, force=True, objectId=False, exc=False)
-            if (not token or not token.get('userId') or
-                    token['userId'] != user['_id'] or
-                    not Token().hasScope(token, TokenScope.TEMPORARY_USER_AUTH)):
+            if (not token or not token.get('userId')
+                    or token['userId'] != user['_id']
+                    or not Token().hasScope(token, TokenScope.TEMPORARY_USER_AUTH)):
                 raise AccessException('Old password is incorrect.')
 
         self._model.setPassword(user, new)
@@ -299,7 +287,7 @@ class User(Resource):
 
     @access.public
     @autoDescribeRoute(
-        Description('Create a temporary access token for a user.  The user\'s '
+        Description("Create a temporary access token for a user.  The user's "
                     'password is not changed.')
         .param('email', 'Your email address.', strip=True)
         .errorResponse('That email does not exist in the system.')
@@ -319,9 +307,10 @@ class User(Resource):
             'url': url,
             'token': str(token['_id'])
         })
-        mail_utils.sendEmail(
-            to=email, subject='%s: Temporary access' % Setting().get(SettingKey.BRAND_NAME),
-            text=html
+        mail_utils.sendMail(
+            '%s: Temporary access' % Setting().get(SettingKey.BRAND_NAME),
+            html,
+            [email]
         )
         return {'message': 'Sent temporary access email.'}
 
@@ -370,6 +359,60 @@ class User(Resource):
             'nFolders': self._model.countFolders(
                 user, filterUser=self.getCurrentUser(), level=AccessType.READ)
         }
+
+    @access.user
+    @autoDescribeRoute(
+        Description('Initiate the enablement of one-time passwords for this user.')
+        .modelParam('id', model=UserModel, level=AccessType.ADMIN)
+        .errorResponse()
+        .errorResponse('Admin access was denied on the user.', 403)
+    )
+    def initializeOtp(self, user):
+        if self._model.hasOtpEnabled(user):
+            raise RestException('The user has already enabled one-time passwords.')
+
+        otpUris = self._model.initializeOtp(user)
+        self._model.save(user)
+
+        return otpUris
+
+    @access.user
+    @autoDescribeRoute(
+        Description('Finalize the enablement of one-time passwords for this user.')
+        .modelParam('id', model=UserModel, level=AccessType.ADMIN)
+        .param('Girder-OTP', 'A one-time password for this user', paramType='header')
+        .errorResponse()
+        .errorResponse('Admin access was denied on the user.', 403)
+    )
+    def finalizeOtp(self, user):
+        otpToken = cherrypy.request.headers.get('Girder-OTP')
+        if not otpToken:
+            raise RestException('The "Girder-OTP" header must be provided.')
+
+        if 'otp' not in user:
+            raise RestException('The user has not initialized one-time passwords.')
+        if self._model.hasOtpEnabled(user):
+            raise RestException('The user has already enabled one-time passwords.')
+
+        user['otp']['enabled'] = True
+        # This will raise an exception if the verification fails, so the user will not be saved
+        self._model.verifyOtp(user, otpToken)
+
+        self._model.save(user)
+
+    @access.user
+    @autoDescribeRoute(
+        Description('Disable one-time passwords for this user.')
+        .modelParam('id', model=UserModel, level=AccessType.ADMIN)
+        .errorResponse()
+        .errorResponse('Admin access was denied on the user.', 403)
+    )
+    def removeOtp(self, user):
+        if not self._model.hasOtpEnabled(user):
+            raise RestException('The user has not enabled one-time passwords.')
+
+        del user['otp']
+        self._model.save(user)
 
     @access.public
     @autoDescribeRoute(

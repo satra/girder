@@ -1,44 +1,32 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cherrypy
 import datetime
+import os
 import six
 
 from .model_base import Model, AccessControlledModel
-from girder import events
+from girder import auditLogger, events
 from girder.constants import AccessType, CoreEventHandler
-from girder.exceptions import ValidationException
-from girder.utility import acl_mixin
+from girder.exceptions import FilePathException, ValidationException
+from girder.models.setting import Setting
+from girder.settings import SettingKey
+from girder.utility import acl_mixin, path as path_util
+from girder.utility.model_importer import ModelImporter
 
 
 class File(acl_mixin.AccessControlMixin, Model):
     """
     This model represents a File, which is stored in an assetstore.
     """
+
     def initialize(self):
         from girder.utility import assetstore_utilities
 
         self.name = 'file'
         self.ensureIndices(
-            ['itemId', 'assetstoreId', 'exts'] +
-            assetstore_utilities.fileIndexFields())
+            ['itemId', 'assetstoreId', 'exts']
+            + assetstore_utilities.fileIndexFields())
+        self.ensureTextIndex({'name': 1})
         self.resourceColl = 'item'
         self.resourceParent = 'itemId'
 
@@ -101,6 +89,15 @@ class File(acl_mixin.AccessControlMixin, Model):
             'file': file,
             'startByte': offset,
             'endByte': endByte})
+
+        auditLogger.info('file.download', extra={
+            'details': {
+                'fileId': file['_id'],
+                'startByte': offset,
+                'endByte': endByte,
+                'extraParameters': extraParameters
+            }
+        })
 
         if file.get('assetstoreId'):
             try:
@@ -177,9 +174,9 @@ class File(acl_mixin.AccessControlMixin, Model):
         if file.get('assetstoreType'):
             try:
                 if isinstance(file['assetstoreType'], six.string_types):
-                    return self.model(file['assetstoreType'])
+                    return ModelImporter.model(file['assetstoreType'])
                 else:
-                    return self.model(*file['assetstoreType'])
+                    return ModelImporter.model(*file['assetstoreType'])
             except Exception:
                 raise ValidationException(
                     'Invalid assetstore type: %s.' % (file['assetstoreType'],))
@@ -285,7 +282,7 @@ class File(acl_mixin.AccessControlMixin, Model):
         }, field='size', amount=sizeIncrement, multi=False)
 
         # Propagate size up to root data node
-        self.model(item['baseParentType']).increment(query={
+        ModelImporter.model(item['baseParentType']).increment(query={
             '_id': item['baseParentId']
         }, field='size', amount=sizeIncrement, multi=False)
 
@@ -377,10 +374,13 @@ class File(acl_mixin.AccessControlMixin, Model):
 
     def getAssetstoreAdapter(self, file):
         """
-        Return the assetstore adapter for the given file.
+        Return the assetstore adapter for the given file.  Return None if the
+        file has no assetstore.
         """
         from girder.utility import assetstore_utilities
 
+        if not file.get('assetstoreId'):
+            return None
         assetstore = self._getAssetstoreModel(file).load(file['assetstoreId'])
         return assetstore_utilities.getAssetstoreAdapter(assetstore)
 
@@ -422,9 +422,9 @@ class File(acl_mixin.AccessControlMixin, Model):
         if file.get('attachedToId'):
             attachedToType = file.get('attachedToType')
             if isinstance(attachedToType, six.string_types):
-                modelType = self.model(attachedToType)
+                modelType = ModelImporter.model(attachedToType)
             elif isinstance(attachedToType, list) and len(attachedToType) == 2:
-                modelType = self.model(*attachedToType)
+                modelType = ModelImporter.model(*attachedToType)
             else:
                 # Invalid 'attachedToType'
                 return True
@@ -473,3 +473,41 @@ class File(acl_mixin.AccessControlMixin, Model):
         :rtype: girder.utility.abstract_assetstore_adapter.FileHandle
         """
         return self.getAssetstoreAdapter(file).open(file)
+
+    def getGirderMountFilePath(self, file, validate=True):
+        """
+        If possible, get the path of the file on a local girder mount.
+
+        :param file: The file document.
+        :param validate: if True, check if the path exists and raise an
+            exception if it does not.
+        :returns: a girder mount path to the file or None if no such path is
+            available.
+        """
+        mount = Setting().get(SettingKey.GIRDER_MOUNT_INFORMATION)
+        if mount:
+            path = mount['path'].rstrip('/') + path_util.getResourcePath('file', file, force=True)
+            if not validate or os.path.exists(path):
+                return path
+        if validate:
+            raise FilePathException("This file isn't accessible from a Girder mount.")
+
+    def getLocalFilePath(self, file):
+        """
+        If an assetstore adapter supports it, return a path to the file on the
+        local file system.
+
+        :param file: The file document.
+        :returns: a local path to the file or None if no such path is known.
+        """
+        adapter = self.getAssetstoreAdapter(file)
+        try:
+            return adapter.getLocalFilePath(file)
+        except FilePathException as exc:
+            try:
+                return self.getGirderMountFilePath(file, True)
+            except Exception:
+                # If getting a Girder mount path throws, raise the original
+                # exception
+                pass
+            raise exc

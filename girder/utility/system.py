@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2014 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cherrypy
 import os
 import psutil
@@ -38,11 +20,13 @@ def _objectToDict(obj):
     :param obj: a python object or class.
     :returns: a dictionary of values for the object.
     """
-    return {key: getattr(obj, key) for key in dir(obj) if
-            not key.startswith('_') and
-            isinstance(getattr(obj, key),
-                       tuple([float, tuple] + list(six.string_types) +
-                             list(six.integer_types)))}
+    return {
+        key: getattr(obj, key)
+        for key in dir(obj)
+        if not key.startswith('_') and isinstance(
+            getattr(obj, key),
+            tuple([float, tuple] + list(six.string_types) + list(six.integer_types)))
+    }
 
 
 def _computeSlowStatus(process, status, db):
@@ -71,15 +55,10 @@ def _computeSlowStatus(process, status, db):
             # exception
             pass
     status['mongoDbStats'] = db.command('dbStats')
-    try:
-        # I don't know if this will work with a sharded database, so guard
-        # it and don't throw an exception
-        status['mongoDbPath'] = getDbConnection().admin.command(
-            'getCmdLineOpts')['parsed']['storage']['dbPath']
-        status['mongoDbDiskUsage'] = _objectToDict(
-            psutil.disk_usage(status['mongoDbPath']))
-    except Exception:
-        pass
+    status['mongoDbPath'] = getDbConnection().admin.command(
+        'getCmdLineOpts')['parsed']['storage']['dbPath']
+    status['mongoDbDiskUsage'] = _objectToDict(
+        psutil.disk_usage(status['mongoDbPath']))
 
     status['processDirectChildrenCount'] = len(process.children())
     status['processAllChildrenCount'] = len(process.children(True))
@@ -213,4 +192,4 @@ class StatusMonitor(cherrypy.Tool):
 
 
 cherrypy.tools.status = StatusMonitor()
-cherrypy.config.update({"tools.status.on": True})
+cherrypy.config.update({'tools.status.on': True})

@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 from ..describe import Description, autoDescribeRoute
 from ..rest import Resource, filtermodel, setResponseHeader, setContentDisposition
 from girder.utility import ziputil
@@ -51,7 +33,7 @@ class Item(Resource):
     @filtermodel(model=ItemModel)
     @autoDescribeRoute(
         Description('List or search for items.')
-        .notes('You must pass either a "itemId" or "text" field'
+        .notes('You must pass either a "itemId" or "text" field '
                'to specify how you are searching for items.  '
                'If you omit one of these parameters the request will fail and respond : '
                '"Invalid search mode."')
@@ -91,11 +73,11 @@ class Item(Resource):
             if name:
                 filters['name'] = name
 
-            return list(Folder().childItems(
-                folder=folder, limit=limit, offset=offset, sort=sort, filters=filters))
+            return Folder().childItems(
+                folder=folder, limit=limit, offset=offset, sort=sort, filters=filters)
         elif text is not None:
-            return list(self._model.textSearch(
-                text, user=user, limit=limit, offset=offset, sort=sort))
+            return self._model.textSearch(
+                text, user=user, limit=limit, offset=offset, sort=sort)
         else:
             raise RestException('Invalid search mode.')
 
@@ -232,10 +214,9 @@ class Item(Resource):
         .errorResponse('Read access was denied for the item.', 403)
     )
     def getFiles(self, item, limit, offset, sort):
-        return list(self._model.childFiles(item=item, limit=limit, offset=offset, sort=sort))
+        return self._model.childFiles(item=item, limit=limit, offset=offset, sort=sort)
 
-    @access.cookie
-    @access.public(scope=TokenScope.DATA_READ)
+    @access.public(scope=TokenScope.DATA_READ, cookie=True)
     @autoDescribeRoute(
         Description('Download the contents of an item.')
         .modelParam('id', model=ItemModel, level=AccessType.READ)
@@ -243,7 +224,7 @@ class Item(Resource):
                required=False, default=0)
         .param('format', 'If unspecified, items with one file are downloaded '
                'as that file, and other items are downloaded as a zip '
-               'archive.  If \'zip\', a zip archive is always sent.',
+               "archive.  If 'zip', a zip archive is always sent.",
                required=False)
         .param('contentDisposition', 'Specify the Content-Disposition response '
                'header disposition-type value, only applied for single file '
@@ -284,7 +265,7 @@ class Item(Resource):
 
     @access.public(scope=TokenScope.DATA_READ)
     @autoDescribeRoute(
-        Description('Get the path to the root of the item\'s hierarchy.')
+        Description("Get the path to the root of the item's hierarchy.")
         .modelParam('id', model=ItemModel, level=AccessType.READ)
         .errorResponse('ID was invalid.')
         .errorResponse('Read access was denied for the item.', 403)
@@ -301,7 +282,7 @@ class Item(Resource):
         .responseClass('Item')
         .modelParam('id', 'The ID of the original item.', model=ItemModel, level=AccessType.READ)
         .modelParam('folderId', 'The ID of the parent folder.', required=False, model=Folder,
-                    level=AccessType.WRITE)
+                    level=AccessType.WRITE, paramType='query')
         .param('name', 'Name for the new item.', required=False, strip=True)
         .param('description', 'Description for the new item.', required=False, strip=True)
         .errorResponse(('A parameter was invalid.',

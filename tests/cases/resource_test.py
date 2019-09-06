@@ -1,38 +1,20 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2014 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import datetime
 import io
 import json
 import os
 import six
+from six.moves import range, urllib
 import zipfile
 
 from .. import base
 
-import girder.utility.ziputil
 from girder.models.notification import Notification, ProgressState
 from girder.models.collection import Collection
 from girder.models.item import Item
 from girder.models.folder import Folder
 from girder.models.user import User
-from six.moves import range, urllib
+import girder.utility.ziputil
 
 
 def setUpModule():
@@ -125,16 +107,16 @@ class ResourceTestCase(base.TestCase):
         Item().setMetadata(self.items[2], meta)
         parents = Item().parentsToRoot(self.items[2], self.admin)
         path = os.path.join(*([part['object'].get(
-            'name', part['object'].get('login', '')) for part in parents] +
-            [self.items[2]['name'], 'girder-item-metadata.json']))
+            'name', part['object'].get('login', '')) for part in parents]
+            + [self.items[2]['name'], 'girder-item-metadata.json']))
         self.expectedZip[path] = meta
 
         meta = {'x': 'y'}
         Item().setMetadata(self.items[4], meta)
         parents = Item().parentsToRoot(self.items[4], self.admin)
         path = os.path.join(*([part['object'].get(
-            'name', part['object'].get('login', '')) for part in parents] +
-            [self.items[4]['name'], 'girder-item-metadata.json']))
+            'name', part['object'].get('login', '')) for part in parents]
+            + [self.items[4]['name'], 'girder-item-metadata.json']))
         self.expectedZip[path] = meta
 
         meta = {'key2': 'value2', 'date': datetime.datetime.utcnow()}
@@ -144,8 +126,8 @@ class ResourceTestCase(base.TestCase):
         Folder().setMetadata(self.adminPublicFolder, meta)
         parents = Folder().parentsToRoot(self.adminPublicFolder, user=user)
         path = os.path.join(*([part['object'].get(
-            'name', part['object'].get('login', '')) for part in parents] +
-            [self.adminPublicFolder['name'], 'girder-folder-metadata.json']))
+            'name', part['object'].get('login', '')) for part in parents]
+            + [self.adminPublicFolder['name'], 'girder-folder-metadata.json']))
         self.expectedZip[path] = meta
 
     def _uploadFile(self, name, item):
@@ -158,27 +140,12 @@ class ResourceTestCase(base.TestCase):
                   contents: the contents that were generated for the file.
         """
         contents = os.urandom(1024)
-        resp = self.request(
-            path='/file', method='POST', user=self.admin, params={
-                'parentType': 'item',
-                'parentId': item['_id'],
-                'name': name,
-                'size': len(contents),
-                'mimeType': 'application/octet-stream'
-            })
-        self.assertStatusOk(resp)
-        upload = resp.json
-        fields = [('offset', 0), ('uploadId', upload['_id'])]
-        files = [('chunk', name, contents)]
-        resp = self.multipartRequest(
-            path='/file/chunk', user=self.admin, fields=fields, files=files)
-        self.assertStatusOk(resp)
-        file = resp.json
+        file = self.uploadFile(name, contents, user=self.admin, parent=item, parentType='item')
         parents = Item().parentsToRoot(item, user=self.admin)
         path = os.path.join(*([part['object'].get(
-            'name', part['object'].get('login', '')) for part in parents] +
-            [item['name'], name]))
-        return (file, path, contents)
+            'name', part['object'].get('login', '')) for part in parents]
+            + [item['name'], name]))
+        return file, path, contents
 
     def testDownloadResources(self):
         self._createFiles()
@@ -273,8 +240,8 @@ class ResourceTestCase(base.TestCase):
         self.assertEqual(notifs[0]['data']['message'], 'Done')
         self.assertEqual(notifs[0]['data']['total'], 6)
         self.assertEqual(notifs[0]['data']['current'], 6)
-        self.assertTrue(notifs[0]['expires'] < datetime.datetime.utcnow() +
-                        datetime.timedelta(minutes=1))
+        self.assertTrue(notifs[0]['expires'] < datetime.datetime.utcnow()
+                        + datetime.timedelta(minutes=1))
         # Test deletes using a body on the request
         resourceList = {
             'item': [str(self.items[1]['_id'])]
@@ -406,8 +373,8 @@ class ResourceTestCase(base.TestCase):
         resp = self.request(path='/resource/lookup',
                             method='GET', user=self.admin,
                             params={'path':
-                                    '/collection/Test Collection/' +
-                                    self.collectionPrivateFolder['name']})
+                                    '/collection/Test Collection/'
+                                    + self.collectionPrivateFolder['name']})
         self.assertStatusOk(resp)
         self.assertEqual(str(resp.json['_id']),
                          str(self.collectionPrivateFolder['_id']))
@@ -457,26 +424,14 @@ class ResourceTestCase(base.TestCase):
                 str(resp.json['_id']), str(item['_id']))
 
         # test bogus path
-        # test is not set
         resp = self.request(path='/resource/lookup',
                             method='GET', user=self.user,
                             params={'path': '/bogus/path'})
         self.assertStatus(resp, 400)
-        # test is set to false, response code should be 400
         resp = self.request(path='/resource/lookup',
                             method='GET', user=self.user,
-                            params={'path': '/collection/bogus/path',
-                                    'test': False})
+                            params={'path': '/collection/bogus/path'})
         self.assertStatus(resp, 400)
-
-        # test is set to true, response code should be 200 and response body
-        # should be null (None)
-        resp = self.request(path='/resource/lookup',
-                            method='GET', user=self.user,
-                            params={'path': '/collection/bogus/path',
-                                    'test': True})
-        self.assertStatusOk(resp)
-        self.assertEqual(resp.json, None)
 
     def testGetResourcePath(self):
         self._createFiles()
@@ -716,7 +671,7 @@ class ResourceTestCase(base.TestCase):
         resp = self.request(path='/item', method='GET', user=self.user,
                             params={'folderId': str(copiedFolder['_id'])})
         self.assertStatusOk(resp)
-        self.assertEqual(len(resp.json), len(self.items)+1)
+        self.assertEqual(len(resp.json), len(self.items) + 1)
         # Copying a non-existant object should give an error
         resp = self.request(
             path='/resource/copy', method='POST', user=self.admin, params={
@@ -746,22 +701,22 @@ class ResourceTestCase(base.TestCase):
         # calculation.  We turn it off so that we can perform tests in a timely
         # fashion.
         zip.useCRC = False
-        for data in zip.addFile(
+        for _ in zip.addFile(
                 genEmptyFile(6 * 1024 * 1024 * 1024), 'bigfile'):
             pass
         # Add a second small file at the end to test some of the other Zip64
         # code
-        for data in zip.addFile(genEmptyFile(100), 'smallfile'):
+        for _ in zip.addFile(genEmptyFile(100), 'smallfile'):
             pass
         # Test that we don't crash on Unicode file names
-        for data in zip.addFile(
+        for _ in zip.addFile(
                 genEmptyFile(100), u'\u0421\u0443\u043f\u0435\u0440-\u0440'
                 '\u0443\u0441\u0441\u043a\u0438, \u0627\u0633\u0645 \u0627'
                 '\u0644\u0645\u0644\u0641 \u0628\u0627\u0644\u0644\u063a'
                 '\u0629 \u0627\u0644\u0639\u0631\u0628\u064a\u0629'):
             pass
         # Test filename with a null
-        for data in zip.addFile(genEmptyFile(100), 'with\x00null'):
+        for _ in zip.addFile(genEmptyFile(100), 'with\x00null'):
             pass
         footer = zip.footer()
         self.assertEqual(footer[-6:], b'\xFF\xFF\xFF\xFF\x00\x00')

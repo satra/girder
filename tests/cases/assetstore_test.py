@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import botocore
 import httmock
 import inspect
@@ -205,11 +187,9 @@ class AssetstoreTestCase(base.TestCase):
         self.assertStatusOk(resp)
 
         resp = self.request('/resource/lookup', user=self.admin, params={
-            'path': '/user/admin/Public/world.txt/world.txt',
-            'test': True
+            'path': '/user/admin/Public/world.txt/world.txt'
         })
-        self.assertStatusOk(resp)
-        self.assertIsNone(resp.json)
+        self.assertStatus(resp, 400)
 
         # Do the import with the include regex on
         resp = self.request(
@@ -228,11 +208,9 @@ class AssetstoreTestCase(base.TestCase):
 
         # world.txt should not
         resp = self.request('/resource/lookup', user=self.admin, params={
-            'path': '/user/admin/Public/world.txt/world.txt',
-            'test': True
+            'path': '/user/admin/Public/world.txt/world.txt'
         })
-        self.assertStatusOk(resp)
-        self.assertIsNone(resp.json)
+        self.assertStatus(resp, 400)
 
         # Run import without any regexes specified, all files should be imported
         resp = self.request(path, method='POST', params=params, user=self.admin)
@@ -255,6 +233,18 @@ class AssetstoreTestCase(base.TestCase):
 
         self.assertIsNone(File().load(file['_id'], force=True))
         self.assertTrue(os.path.isfile(file['path']))
+
+        # Attempt to import a folder with an item directly into user; should fail
+        resp = self.request(
+            '/assetstore/%s/import' % self.assetstore['_id'], method='POST', params={
+                'importPath': os.path.join(
+                    ROOT_DIR, 'tests', 'cases', 'py_client', 'testdata'),
+                'destinationType': 'user',
+                'destinationId': self.admin['_id']
+            }, user=self.admin)
+        self.assertStatus(resp, 400)
+        self.assertEqual(
+            resp.json['message'], 'Files cannot be imported directly underneath a user.')
 
     def testFilesystemAssetstoreImportLeafFoldersAsItems(self):
         folder = six.next(Folder().childFolders(
@@ -329,21 +319,20 @@ class AssetstoreTestCase(base.TestCase):
         self.assertTrue(inspect.isgeneratorfunction(adapter.findInvalidFiles))
 
         with ProgressContext(True, user=self.admin, title='test') as p:
-            for i, info in enumerate(
-                    adapter.findInvalidFiles(progress=p, filters={
-                        'imported': True
-                    }), 1):
-                self.assertEqual(info['reason'], 'missing')
-                self.assertEqual(info['file']['_id'], fakeImport['_id'])
-            self.assertEqual(i, 1)
+            invalidFiles = list(adapter.findInvalidFiles(progress=p, filters={
+                'imported': True
+            }))
+            self.assertEqual(len(invalidFiles), 1)
+            self.assertEqual(invalidFiles[0]['reason'], 'missing')
+            self.assertEqual(invalidFiles[0]['file']['_id'], fakeImport['_id'])
             self.assertEqual(p.progress['data']['current'], 2)
             self.assertEqual(p.progress['data']['total'], 2)
 
-            for i, info in enumerate(
-                    adapter.findInvalidFiles(progress=p), 1):
-                self.assertEqual(info['reason'], 'missing')
-                self.assertIn(info['file']['_id'], (fakeImport['_id'], fake['_id']))
-            self.assertEqual(i, 2)
+            invalidFiles = list(adapter.findInvalidFiles(progress=p))
+            self.assertEqual(len(invalidFiles), 2)
+            for invalidFile in invalidFiles:
+                self.assertEqual(invalidFile['reason'], 'missing')
+                self.assertIn(invalidFile['file']['_id'], (fakeImport['_id'], fake['_id']))
             self.assertEqual(p.progress['data']['current'], 3)
             self.assertEqual(p.progress['data']['total'], 3)
 
@@ -356,8 +345,8 @@ class AssetstoreTestCase(base.TestCase):
         # Create a second assetstore so that when we delete the first one, the
         # current assetstore will be switched to the second one.
         secondStore = Assetstore().createFilesystemAssetstore(
-            'Another Store',  os.path.join(ROOT_DIR, 'tests', 'assetstore',
-                                           'server_assetstore_test2'))
+            'Another Store',
+            os.path.join(ROOT_DIR, 'tests', 'assetstore', 'server_assetstore_test2'))
         # make sure our original asset store is the current one
         current = Assetstore().getCurrent()
         self.assertEqual(current['_id'], assetstore['_id'])
@@ -790,7 +779,7 @@ class AssetstoreTestCase(base.TestCase):
                 client.get_object(Bucket='bucketname', Key=file['s3Key'])
             except botocore.exceptions.ClientError:
                 break
-            if time.time()-startTime > 15:
+            if time.time() - startTime > 15:
                 break  # give up and fail
             time.sleep(0.1)
         with self.assertRaises(botocore.exceptions.ClientError):
@@ -835,10 +824,10 @@ class AssetstoreTestCase(base.TestCase):
             path='/file', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         upload = resp.json
-        fields = [('offset', 0), ('uploadId', upload['_id'])]
-        files = [('chunk', 'helloWorld.txt', uploadData)]
-        resp = self.multipartRequest(
-            path='/file/chunk', user=self.admin, fields=fields, files=files)
+        resp = self.request(
+            path='/file/chunk', method='POST', user=self.admin, body=uploadData, params={
+                'uploadId': upload['_id']
+            }, type='text/plain')
         self.assertStatusOk(resp)
         self.assertEqual(resp.json['assetstoreId'], fs_assetstore['_id'])
         uploadedFiles = [resp.json]
@@ -849,10 +838,10 @@ class AssetstoreTestCase(base.TestCase):
             path='/file', method='POST', user=self.admin, params=params)
         self.assertStatusOk(resp)
         upload = resp.json
-        fields = [('offset', 0), ('uploadId', upload['_id'])]
-        files = [('chunk', 'helloWorld.txt', uploadData)]
-        resp = self.multipartRequest(
-            path='/file/chunk', user=self.admin, fields=fields, files=files)
+        resp = self.request(
+            path='/file/chunk', method='POST', user=self.admin, body=uploadData, params={
+                'uploadId': upload['_id']
+            }, type='text/plain')
         self.assertStatusOk(resp)
         self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
         uploadedFiles.append(resp.json)
@@ -868,9 +857,11 @@ class AssetstoreTestCase(base.TestCase):
             user=self.admin, params=replaceParams)
         self.assertStatusOk(resp)
         upload = resp.json
-        fields = [('offset', 0), ('uploadId', upload['_id'])]
-        resp = self.multipartRequest(
-            path='/file/chunk', user=self.admin, fields=fields, files=files)
+
+        resp = self.request(
+            path='/file/chunk', method='POST', user=self.admin, body=uploadData, params={
+                'uploadId': upload['_id']
+            }, type='text/plain')
         self.assertStatusOk(resp)
         self.assertEqual(resp.json['assetstoreId'], gridfs_assetstore['_id'])
         uploadedFiles[0] = resp.json
@@ -990,7 +981,7 @@ class AssetstoreTestCase(base.TestCase):
             progress=ProgressContext(False), user=self.admin, leafFoldersAsItems=False)
 
         file = path_util.lookUpPath('/user/admin/Public/world.txt/world.txt',
-                                    self.admin, False)['document']
+                                    self.admin)['document']
 
         # Move file
         params = {

@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import mock
 import pytest
 import time
@@ -24,7 +6,7 @@ import time
 from girder import events
 
 
-class EventsHelper():
+class EventsHelper(object):
     def __init__(self):
         self.ctr = 0
         self.responses = None
@@ -151,11 +133,11 @@ def testForegroundDaemon(eventsHelper):
         eventsHelper.ctr += 1
         eventsHelper.responses = event.responses
 
-    with events.bound('_test.event',  '_test.handler', eventsHelper._raiseException):
+    with events.bound('_test.event', '_test.handler', eventsHelper._raiseException):
         with pytest.raises(Exception, match='^Failure condition$'):
             events.daemon.trigger('_test.event', None, callback)
 
-    with events.bound('_test.event',  '_test.handler', eventsHelper._incrementWithResponse):
+    with events.bound('_test.event', '_test.handler', eventsHelper._incrementWithResponse):
         events.daemon.trigger('_test.event', {'amount': 2}, callback)
 
     assert eventsHelper.ctr == 3

@@ -39,7 +39,7 @@ describe('Unit test the job detail widget.', function () {
                 return $.Deferred().resolve(jobInfo).promise();
             });
 
-            girder.router.navigate('job/foo', {trigger: true});
+            girder.router.navigate('job/foo', { trigger: true });
         });
 
         waitsFor(function () {
@@ -133,7 +133,7 @@ describe('Unit test the job detail widget.', function () {
         runs(function () {
             girder.plugins.jobs.models.JobModel.prototype.fetch.andCallThrough();
             // Return to the main page, since 'job/foo' isn't legal without mocking
-            girder.router.navigate('', {trigger: true});
+            girder.router.navigate('', { trigger: true });
         });
         girderTest.waitForLoad();
     });
@@ -497,11 +497,11 @@ describe('Unit test the job list widget.', function () {
         });
         waitsFor(function () {
             // Charts will render asynchronously with Vega
-            return widget.$('.g-jobs-graph svg .mark-rect.timing rect').length;
+            return widget.$('.g-jobs-graph svg .mark-rect.timing path').length;
         }, 'timing history graph to render');
 
         runs(function () {
-            expect(widget.$('.g-jobs-graph svg .mark-rect.timing rect').length).toBe(6);
+            expect(widget.$('.g-jobs-graph svg .mark-rect.timing path').length).toBe(9);
             $('.g-jobs.nav.nav-tabs li a[name="time"]').tab('show');
         });
         waitsFor(function () {

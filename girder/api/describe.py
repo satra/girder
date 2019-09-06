@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import bson.json_util
 import dateutil.parser
 import inspect
@@ -28,9 +10,10 @@ from collections import OrderedDict
 
 from girder import constants, logprint
 from girder.api.rest import getCurrentUser, getBodyJson
-from girder.constants import SettingKey, SortDir
+from girder.constants import SortDir, VERSION
 from girder.exceptions import RestException
 from girder.models.setting import Setting
+from girder.settings import SettingKey
 from girder.utility import config, toBool
 from girder.utility.model_importer import ModelImporter
 from girder.utility.webroot import WebrootBase
@@ -42,15 +25,6 @@ if six.PY3:
     from inspect import signature, Parameter
 else:
     from funcsigs import signature, Parameter
-
-"""
-Whenever we add new return values or new options we should increment the
-maintenance value. Whenever we add new endpoints, we should increment the minor
-version. If we break backward compatibility in any way, we should increment the
-major version.  This value is derived from the version number given in
-the top level package.json.
-"""
-API_VERSION = constants.VERSION['apiVersion']
 
 SWAGGER_VERSION = '2.0'
 
@@ -103,7 +77,6 @@ class Description(object):
         """
         Returns this description object as an appropriately formatted dict
         """
-
         # Responses Object spec:
         # The Responses Object MUST contain at least one response code, and it
         # SHOULD be the response for a successful operation call.
@@ -458,6 +431,7 @@ class ApiDocs(WebrootBase):
     """
     This serves up the Swagger page.
     """
+
     def __init__(self, templatePath=None):
         if not templatePath:
             templatePath = os.path.join(constants.PACKAGE_DIR,
@@ -465,18 +439,12 @@ class ApiDocs(WebrootBase):
         super(ApiDocs, self).__init__(templatePath)
 
         curConfig = config.getConfig()
-        mode = curConfig['server'].get('mode', '')
-
-        self.vars = {
-            'apiRoot': '',
-            'staticRoot': '',
-            'mode': mode
-        }
+        self.vars['mode'] = curConfig['server'].get('mode', '')
 
     def _renderHTML(self):
         from girder.utility import server
         self.vars['apiRoot'] = server.getApiRoot()
-        self.vars['staticRoot'] = server.getApiStaticRoot()
+        self.vars['staticPublicPath'] = server.getStaticPublicPath()
         self.vars['brandName'] = Setting().get(SettingKey.BRAND_NAME)
         return super(ApiDocs, self)._renderHTML()
 
@@ -541,7 +509,7 @@ class Describe(Resource):
             'swagger': SWAGGER_VERSION,
             'info': {
                 'title': 'Girder REST API',
-                'version': API_VERSION
+                'version': VERSION['release']
             },
             'host': host,
             'basePath': basePath,
@@ -557,6 +525,8 @@ class describeRoute(object):  # noqa: class name
         This returns a decorator to set the API documentation on a route
         handler. Pass the Description object (or None) that you want to use to
         describe this route. It should be used like the following example:
+
+        .. code-block:: python
 
             @describeRoute(
                 Description('Do something')
@@ -659,6 +629,8 @@ class autoDescribeRoute(describeRoute):  # noqa: class name
             params = {k: v for k, v in six.viewitems(kwargs) if k != 'params'}
             params.update(kwargs.get('params', {}))
 
+            kwargs['params'] = kwargs.get('params', {})
+
             for descParam in self.description.params:
                 # We need either a type or a schema ( for message body )
                 if 'type' not in descParam and 'schema' not in descParam:
@@ -687,6 +659,8 @@ class autoDescribeRoute(describeRoute):  # noqa: class name
                         self._passArg(fun, kwargs, name, val)
                     else:
                         self._passArg(fun, kwargs, name, cherrypy.request.body)
+                elif descParam['in'] == 'header':
+                    continue  # For now, do nothing with header params
                 elif 'default' in descParam:
                     self._passArg(fun, kwargs, name, descParam['default'])
                 elif descParam['required']:
@@ -716,7 +690,7 @@ class autoDescribeRoute(describeRoute):  # noqa: class name
                 jsonschema.validate(val, info['schema'])
             except jsonschema.ValidationError as e:
                 raise RestException('Invalid JSON object for parameter %s: %s' % (
-                    name, e.message))
+                    name, str(e)))
         elif info['requireObject'] and not isinstance(val, dict):
             raise RestException('Parameter %s must be a JSON object.' % name)
         elif info['requireArray'] and not isinstance(val, list):
@@ -824,7 +798,7 @@ class autoDescribeRoute(describeRoute):  # noqa: class name
         elif type == 'number':
             value = self._handleNumber(name, descParam, value)
 
-        # Enum validation (should be afer type coercion)
+        # Enum validation (should be after type coercion)
         if 'enum' in descParam and value not in descParam['enum']:
             raise RestException('Invalid value for %s: "%s". Allowed values: %s.' % (
                 name, value, ', '.join(str(v) for v in descParam['enum'])))

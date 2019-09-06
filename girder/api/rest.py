@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cgi
 import cherrypy
 import collections
@@ -24,20 +6,25 @@ import datetime
 import inspect
 import json
 import posixpath
+import pymongo
 import six
 import sys
 import traceback
+import types
 import unicodedata
+import uuid
 
 from dogpile.cache.util import kwarg_function_key_generator
+from girder.external.mongodb_proxy import MongoProxy
+
 from . import docs
-from girder import events, logger, logprint
-from girder.constants import SettingKey, TokenScope, SortDir
-from girder.exceptions import AccessException, GirderException, ValidationException, \
-    RestException
+from girder import auditLogger, events, logger, logprint
+from girder.constants import TokenScope, SortDir, ServerMode
+from girder.exceptions import AccessException, GirderException, ValidationException, RestException
 from girder.models.setting import Setting
 from girder.models.token import Token
 from girder.models.user import User
+from girder.settings import SettingKey
 from girder.utility import toBool, config, JsonEncoder, optionalArgumentDecorator
 from girder.utility._cache import requestCache
 from girder.utility.model_importer import ModelImporter
@@ -45,6 +32,8 @@ from six.moves import range, urllib
 
 # Arbitrary buffer length for stream-reading request bodies
 READ_BUFFER_LEN = 65536
+
+_MONGO_CURSOR_TYPES = (MongoProxy, pymongo.cursor.Cursor, pymongo.command_cursor.CommandCursor)
 
 
 def getUrlParts(url=None):
@@ -79,7 +68,7 @@ def getApiUrl(url=None, preferReferer=False):
         a cherrypy request that has a referer header that contains the api
         string, use that referer as the url.
     """
-    apiStr = '/api/v1'
+    apiStr = config.getConfig()['server']['api_root']
 
     if not url:
         if preferReferer and apiStr in cherrypy.request.headers.get('referer', ''):
@@ -87,7 +76,7 @@ def getApiUrl(url=None, preferReferer=False):
         else:
             root = Setting().get(SettingKey.SERVER_ROOT)
             if root:
-                return posixpath.join(root, config.getConfig()['server']['api_root'].lstrip('/'))
+                return posixpath.join(root, apiStr.lstrip('/'))
 
     url = url or cherrypy.url()
     idx = url.find(apiStr)
@@ -205,8 +194,9 @@ def getCurrentUser(returnToken=False):
         else:
             return user
 
-    if (token is None or token['expires'] < datetime.datetime.utcnow() or
-            'userId' not in token):
+    if (token is None
+            or token['expires'] < datetime.datetime.utcnow()
+            or 'userId' not in token):
         return retVal(None, token)
     else:
         try:
@@ -246,8 +236,8 @@ def setContentDisposition(filename, disposition='attachment', setHeader=True):
         Content-Disposition header, but do not set it.
     :returns: the content-disposition header value.
     """
-    if (not disposition or (disposition not in ('inline', 'attachment') and
-                            not disposition.startswith('form-data'))):
+    if (not disposition or (disposition not in ('inline', 'attachment')
+                            and not disposition.startswith('form-data'))):
         raise RestException(
             'Error: Content-Disposition (%r) is not a recognized value.' % disposition)
     if not filename:
@@ -266,7 +256,7 @@ def setContentDisposition(filename, disposition='attachment', setHeader=True):
         quotedFilename = six.moves.urllib.parse.quote(utf8Filename)
         if not isinstance(quotedFilename, six.binary_type):
             quotedFilename = quotedFilename.encode('iso8859-1', 'ignore')
-        value += b'; filename*=UTF-8\'\'' + quotedFilename
+        value += b"; filename*=UTF-8''" + quotedFilename
     value = value.decode('utf8')
     if setHeader:
         setResponseHeader('Content-Disposition', value)
@@ -332,7 +322,7 @@ def getParamJson(name, params, default=None):
         raise RestException('The %s parameter must be valid JSON.' % name)
 
 
-class loadmodel(ModelImporter):  # noqa: class name
+class loadmodel(object):  # noqa: class name
     """
     This is a decorator that can be used to load a model based on an ID param.
     For access controlled models, it will check authorization for the current
@@ -358,6 +348,7 @@ class loadmodel(ModelImporter):  # noqa: class name
     :param requiredFlags: Access flags that are required on the object being loaded.
     :type requiredFlags: str or list/set/tuple of str or None
     """
+
     def __init__(self, map=None, model=None, plugin='_core', level=None,
                  force=False, exc=True, requiredFlags=None, **kwargs):
         if map is None:
@@ -367,7 +358,7 @@ class loadmodel(ModelImporter):  # noqa: class name
 
         self.level = level
         self.force = force
-        self.modelName = model
+        self.model = model
         self.plugin = plugin
         self.exc = exc
         self.kwargs = kwargs
@@ -384,7 +375,7 @@ class loadmodel(ModelImporter):  # noqa: class name
     def __call__(self, fun):
         @six.wraps(fun)
         def wrapped(*args, **kwargs):
-            model = self.model(self.modelName, self.plugin)
+            model = ModelImporter.model(self.model, self.plugin)
 
             for raw, converted in six.viewitems(self.map):
                 id = self._getIdValue(kwargs, raw)
@@ -448,7 +439,11 @@ class filtermodel(object):  # noqa: class name
 
             user = getCurrentUser()
 
-            if isinstance(val, (list, tuple)):
+            if isinstance(val, _MONGO_CURSOR_TYPES):
+                if callable(getattr(val, 'count', None)):
+                    cherrypy.response.headers['Girder-Total-Count'] = val.count()
+                return [model.filter(m, user, self.addFields) for m in val]
+            elif isinstance(val, (list, tuple, types.GeneratorType)):
                 return [model.filter(m, user, self.addFields) for m in val]
             elif isinstance(val, dict):
                 return model.filter(val, user, self.addFields)
@@ -535,7 +530,7 @@ def _createResponse(val):
 def _handleRestException(e):
     # Handle all user-error exceptions from the REST layer
     cherrypy.response.status = e.code
-    val = {'message': e.message, 'type': 'rest'}
+    val = {'message': str(e), 'type': 'rest'}
     if e.extra is not None:
         val['extra'] = e.extra
     return val
@@ -548,8 +543,7 @@ def _handleAccessException(e):
         cherrypy.response.status = 401
     else:
         cherrypy.response.status = 403
-        logger.exception('403 Error')
-    val = {'message': e.message, 'type': 'access'}
+    val = {'message': str(e), 'type': 'access'}
     if e.extra is not None:
         val['extra'] = e.extra
     return val
@@ -559,7 +553,7 @@ def _handleGirderException(e):
     # Handle general Girder exceptions
     logger.exception('500 Error')
     cherrypy.response.status = 500
-    val = {'message': e.message, 'type': 'girder'}
+    val = {'message': str(e), 'type': 'girder'}
     if e.identifier is not None:
         val['identifier'] = e.identifier
     return val
@@ -567,9 +561,49 @@ def _handleGirderException(e):
 
 def _handleValidationException(e):
     cherrypy.response.status = 400
-    val = {'message': e.message, 'type': 'validation'}
+    val = {'message': str(e), 'type': 'validation'}
     if e.field is not None:
         val['field'] = e.field
+    return val
+
+
+def disableAuditLog(fun):
+    """
+    If calls to a REST route should not be logged in the audit log, decorate it with this function.
+    """
+    @six.wraps(fun)
+    def wrapped(*args, **kwargs):
+        cherrypy.request.girderNoAuditLog = True
+        return fun(*args, **kwargs)
+    return wrapped
+
+
+def _logRestRequest(resource, path, params):
+    if not hasattr(cherrypy.request, 'girderNoAuditLog'):
+        auditLogger.info('rest.request', extra={
+            'details': {
+                'method': cherrypy.request.method.upper(),
+                'route': (getattr(resource, 'resourceName', resource.__class__.__name__),) + path,
+                'params': params,
+                'status': cherrypy.response.status or 200
+            }
+        })
+
+
+def _mongoCursorToList(val):
+    """
+    If the specified value is a Mongo cursor, convert it to a list.
+    Otherwise, just return the passed values.
+
+    :param val: a value that might be a Mongo cursor.
+    :returns: a list if val was a Mongo cursor, otherwise the original val.
+    """
+    # This needs to be before the callable check, as mongo cursors can
+    # be callable.
+    if isinstance(val, _MONGO_CURSOR_TYPES):
+        if callable(getattr(val, 'count', None)):
+            cherrypy.response.headers['Girder-Total-Count'] = val.count()
+        val = list(val)
     return val
 
 
@@ -586,26 +620,35 @@ def endpoint(fun):
     from the inner method.
     """
     @six.wraps(fun)
-    def endpointDecorator(self, *args, **kwargs):
+    def endpointDecorator(self, *path, **params):
         _setCommonCORSHeaders()
         cherrypy.lib.caching.expires(0)
+        cherrypy.request.girderRequestUid = str(uuid.uuid4())
+        setResponseHeader('Girder-Request-Uid', cherrypy.request.girderRequestUid)
+
         try:
-            val = fun(self, args, kwargs)
+            val = fun(self, path, params)
 
             # If this is a partial response, we set the status appropriately
             if 'Content-Range' in cherrypy.response.headers:
                 cherrypy.response.status = 206
+
+            val = _mongoCursorToList(val)
 
             if callable(val):
                 # If the endpoint returned anything callable (function,
                 # lambda, functools.partial), we assume it's a generator
                 # function for a streaming response.
                 cherrypy.response.stream = True
+                _logRestRequest(self, path, params)
                 return val()
 
             if isinstance(val, cherrypy.lib.file_generator):
                 # Don't do any post-processing of static files
                 return val
+
+            if isinstance(val, types.GeneratorType):
+                val = list(val)
 
         except RestException as e:
             val = _handleRestException(e)
@@ -621,15 +664,21 @@ def endpoint(fun):
             # These are unexpected failures; send a 500 status
             logger.exception('500 Error')
             cherrypy.response.status = 500
-            t, value, tb = sys.exc_info()
-            val = {'message': '%s: %s' % (t.__name__, repr(value)),
-                   'type': 'internal'}
-            curConfig = config.getConfig()
-            if curConfig['server']['mode'] != 'production':
-                # Unless we are in production mode, send a traceback too
+            val = dict(type='internal', uid=cherrypy.request.girderRequestUid)
+
+            if config.getServerMode() == ServerMode.PRODUCTION:
+                # Sanitize errors in production mode
+                val['message'] = 'An unexpected error occurred on the server.'
+            else:
+                # Provide error details in non-production modes
+                t, value, tb = sys.exc_info()
+                val['message'] = '%s: %s' % (t.__name__, repr(value))
                 val['trace'] = traceback.extract_tb(tb)
 
-        return _createResponse(val)
+        resp = _createResponse(val)
+        _logRestRequest(self, path, params)
+
+        return resp
     return endpointDecorator
 
 
@@ -656,7 +705,8 @@ def ensureTokenScopes(token, scope):
             'Invalid token scope.\n'
             'Required: %s.\n'
             'Allowed: %s' % (
-                ' '.join(scope), ' '.join(tokenModel.getAllowedScopes(token))))
+                ' '.join(scope),
+                '' if token is None else ' '.join(tokenModel.getAllowedScopes(token))))
 
 
 def _setCommonCORSHeaders():
@@ -675,21 +725,23 @@ def _setCommonCORSHeaders():
 
     if allowed:
         setResponseHeader('Access-Control-Allow-Credentials', 'true')
+        setResponseHeader(
+            'Access-Control-Expose-Headers', Setting().get(SettingKey.CORS_EXPOSE_HEADERS))
 
-        allowed_list = [o.strip() for o in allowed.split(',')]
-        key = 'Access-Control-Allow-Origin'
+        allowedList = {o.strip() for o in allowed.split(',')}
 
-        if len(allowed_list) == 1:
-            setResponseHeader(key, allowed_list[0])
-        elif origin in allowed_list:
-            setResponseHeader(key, origin)
+        if origin in allowedList:
+            setResponseHeader('Access-Control-Allow-Origin', origin)
+        elif '*' in allowedList:
+            setResponseHeader('Access-Control-Allow-Origin', '*')
 
 
-class Resource(ModelImporter):
+class Resource(object):
     """
     All REST resources should inherit from this class, which provides utilities
     for adding resources/routes to the REST API.
     """
+
     exposed = True
 
     def __init__(self):
@@ -768,21 +820,9 @@ class Resource(ModelImporter):
                 'WARNING: No access level specified for route %s %s' % (
                     method, routePath))
 
-        if method.lower() not in ('head', 'get') \
-            and hasattr(handler, 'cookieAuth') \
-            and not (isinstance(handler.cookieAuth, tuple) and
-                     handler.cookieAuth[1]):
-            routePath = '/'.join([resource] + list(route))
-            logprint.warning(
-                'WARNING: Cannot allow cookie authentication for '
-                'route %s %s without specifying "force=True"' % (
-                    method, routePath))
-
-    def removeRoute(self, method, route, handler=None, resource=None):
+    def removeRoute(self, method, route, resource=None):
         """
         Remove a route from the handler and documentation.
-
-        .. deprecated :: 2.3.0
 
         :param method: The HTTP method, e.g. 'GET', 'POST', 'PUT'
         :type method: str
@@ -790,9 +830,6 @@ class Resource(ModelImporter):
                       resource root. Elements of this list starting with ':'
                       are assumed to be wildcards.
         :type route: tuple[str]
-        :param handler: The method called for the route; this is necessary to
-                        remove the documentation.
-        :type handler: Function
         :param resource: the name of the resource at the root of this route.
         """
         self._ensureInit()
@@ -803,6 +840,8 @@ class Resource(ModelImporter):
                 handler = registeredHandler
                 del nLengthRoutes[i]
                 break
+        else:
+            raise GirderException('No such route: %s %s' % (method, '/'.join(route)))
 
         # Remove the api doc
         if resource is None:
@@ -883,18 +922,8 @@ class Resource(ModelImporter):
         cherrypy.request.requiredScopes = getattr(
             handler, 'requiredScopes', None) or TokenScope.USER_AUTH
 
-        if hasattr(handler, 'cookieAuth'):
-            if isinstance(handler.cookieAuth, tuple):
-                cookieAuth, forceCookie = handler.cookieAuth
-            else:
-                # previously, cookieAuth was not set by a decorator, so the
-                # legacy way must be supported too
-                cookieAuth = handler.cookieAuth
-                forceCookie = False
-            if cookieAuth:
-                if forceCookie or method in ('head', 'get'):
-                    # Allow cookies for the rest of the request
-                    setattr(cherrypy.request, 'girderAllowCookie', True)
+        if getattr(handler, 'cookieAuth', False):
+            cherrypy.request.girderAllowCookie = True
 
         kwargs['params'] = params
         # Add before call for the API method. Listeners can return
@@ -1121,7 +1150,9 @@ class Resource(ModelImporter):
         cookie['girderToken']['path'] = '/'
         cookie['girderToken']['expires'] = int(days * 3600 * 24)
 
-        if Setting().get(SettingKey.SECURE_COOKIE):
+        # CherryPy proxy tools modify the request.base, but not request.scheme, when receiving
+        # X-Forwarded-Proto headers from a reverse proxy
+        if cherrypy.request.scheme == 'https' or cherrypy.request.base.startswith('https'):
             cookie['girderToken']['secure'] = True
 
         return token
@@ -1141,8 +1172,7 @@ class Resource(ModelImporter):
         cherrypy.lib.caching.expires(0)
 
         allowHeaders = Setting().get(SettingKey.CORS_ALLOW_HEADERS)
-        allowMethods = Setting().get(SettingKey.CORS_ALLOW_METHODS)\
-            or 'GET, POST, PUT, HEAD, DELETE'
+        allowMethods = Setting().get(SettingKey.CORS_ALLOW_METHODS)
 
         setResponseHeader('Access-Control-Allow-Methods', allowMethods)
         setResponseHeader('Access-Control-Allow-Headers', allowHeaders)
@@ -1213,8 +1243,7 @@ def boundHandler(fun, ctx=None):
     specific to a Resource subclass.
 
     Plugins that add new routes to existing API resources are encouraged to use
-    this to gain access to bound convenience methods like ``self.model``,
-    ``self.boolParam``, ``self.requireParams``, etc.
+    this to gain access to bound convenience methods like ``self.getCurrentUser``, etc.
 
     :param fun: A REST endpoint.
     :type fun: callable
@@ -1237,4 +1266,5 @@ class Prefix(object):
     """
     Utility class used to provide api prefixes.
     """
+
     exposed = True

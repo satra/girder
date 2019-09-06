@@ -1,7 +1,8 @@
 # Build outputs
-build/
-docs/_build
-docs/_output
+/build/
+/.tox/
+**/dist/
+**/.eggs/
 girder-*.tar.gz
 node_modules/
 *.egg-info
@@ -18,5 +19,6 @@ __pycache__
 .DS_Store
 .idea/
 .PyCharm50/
+.vscode/
 .*.swo
 .*.swp

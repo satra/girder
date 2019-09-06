@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import copy
 import datetime
 import json
@@ -28,6 +10,7 @@ from .model_base import AccessControlledModel
 from girder import events
 from girder.constants import AccessType
 from girder.exceptions import ValidationException, GirderException
+from girder.utility.model_importer import ModelImporter
 from girder.utility.progress import noProgress, setResponseTimeLimit
 
 
@@ -79,9 +62,17 @@ class Folder(AccessControlledModel):
                                   doc['parentCollection'],
                                   'girder.models.folder.invalid-parent-type')
         name = doc['name']
+        # If the folder already exists with the current name, don't check.
+        # Although we don't want duplicate names, they can occur when there are
+        # simultaneous uploads, and also because Mongo has no guaranteed
+        # multi-collection uniqueness constraints.  If this occurs, and we are
+        # changing a non-name property, don't validate the name (since that may
+        # fail).  If the name is being changed, validate that it is probably
+        # unique.
+        checkName = '_id' not in doc or not self.findOne({'_id': doc['_id'], 'name': name})
         n = 0
         itemModel = Item()
-        while True:
+        while checkName:
             q = {
                 'parentId': doc['parentId'],
                 'name': name,
@@ -150,6 +141,11 @@ class Folder(AccessControlledModel):
                 doc['lowerName'] = doc['name'].lower()
                 self.update({'_id': doc['_id']}, {'$set': {
                     'lowerName': doc['lowerName']
+                }})
+            if 'meta' not in doc:
+                doc['meta'] = {}
+                self.update({'_id': doc['_id']}, {'$set': {
+                    'meta': {}
                 }})
 
             self._removeSupplementalFields(doc, fields)
@@ -295,8 +291,8 @@ class Folder(AccessControlledModel):
                            or folder).
         :type parentType: str
         """
-        if (parentType == 'folder' and (self._isAncestor(folder, parent) or
-                                        folder['_id'] == parent['_id'])):
+        if (parentType == 'folder' and (
+                self._isAncestor(folder, parent) or folder['_id'] == parent['_id'])):
             raise ValidationException(
                 'You may not move a folder underneath itself.')
 
@@ -311,7 +307,7 @@ class Folder(AccessControlledModel):
         if (folder['baseParentType'], folder['baseParentId']) !=\
            (rootType, rootId):
             def propagateSizeChange(folder, inc):
-                self.model(folder['baseParentType']).increment(query={
+                ModelImporter.model(folder['baseParentType']).increment(query={
                     '_id': folder['baseParentId']
                 }, field='size', amount=inc, multi=False)
 
@@ -446,12 +442,10 @@ class Folder(AccessControlledModel):
         }
         q.update(filters)
 
-        # Perform the find; we'll do access-based filtering of the result set
-        # afterward.
-        cursor = self.find(q, sort=sort, **kwargs)
+        cursor = self.findWithPermissions(
+            q, sort=sort, user=user, level=AccessType.READ, limit=limit, offset=offset, **kwargs)
 
-        return self.filterResultsByPermission(
-            cursor=cursor, user=user, level=AccessType.READ, limit=limit, offset=offset)
+        return iter(cursor)
 
     def createFolder(self, parent, name, description='', parentType='folder',
                      public=None, creator=None, allowRename=False, reuseExisting=False):
@@ -522,7 +516,8 @@ class Folder(AccessControlledModel):
             'creatorId': creatorId,
             'created': now,
             'updated': now,
-            'size': 0
+            'size': 0,
+            'meta': {}
         }
 
         if parentType in ('folder', 'collection'):
@@ -555,6 +550,17 @@ class Folder(AccessControlledModel):
         # Validate and save the folder
         return self.save(folder)
 
+    def filter(self, doc, user=None, additionalKeys=None):
+        """
+        Overrides the parent ``filter`` method to add an empty meta field
+        (if it doesn't exist) to the returned folder.
+        """
+        filteredDoc = super(Folder, self).filter(doc, user, additionalKeys=additionalKeys)
+        if 'meta' not in filteredDoc:
+            filteredDoc['meta'] = {}
+
+        return filteredDoc
+
     def parentsToRoot(self, folder, curPath=None, user=None, force=False, level=AccessType.READ):
         """
         Get the path to traverse to a root of the hierarchy.
@@ -568,13 +574,13 @@ class Folder(AccessControlledModel):
         curParentType = folder['parentCollection']
 
         if curParentType in ('user', 'collection'):
-            curParentObject = self.model(curParentType).load(
+            curParentObject = ModelImporter.model(curParentType).load(
                 curParentId, user=user, level=level, force=force)
 
             if force:
                 parentFiltered = curParentObject
             else:
-                parentFiltered = self.model(curParentType).filter(curParentObject, user)
+                parentFiltered = ModelImporter.model(curParentType).filter(curParentObject, user)
 
             return [{
                 'type': curParentType,
@@ -609,16 +615,12 @@ class Folder(AccessControlledModel):
         """
         fields = () if level is None else ('access', 'public')
 
-        folders = self.find({
+        folders = self.findWithPermissions({
             'parentId': folder['_id'],
             'parentCollection': 'folder'
-        }, fields=fields)
+        }, fields=fields, user=user, level=level)
 
-        if level is None:
-            return folders.count()
-        else:
-            return sum(1 for _ in self.filterResultsByPermission(
-                cursor=folders, user=user, level=level))
+        return folders.count()
 
     def subtreeCount(self, folder, includeItems=True, user=None, level=None):
         """
@@ -639,14 +641,10 @@ class Folder(AccessControlledModel):
         if includeItems:
             count += self.countItems(folder)
 
-        folders = self.find({
+        folders = self.findWithPermissions({
             'parentId': folder['_id'],
             'parentCollection': 'folder'
-        }, fields=('access',))
-
-        if level is not None:
-            folders = self.filterResultsByPermission(
-                cursor=folders, user=user, level=level)
+        }, fields='access', user=user, level=level)
 
         count += sum(self.subtreeCount(subfolder, includeItems=includeItems,
                                        user=user, level=level)
@@ -693,19 +691,31 @@ class Folder(AccessControlledModel):
         if subpath:
             path = os.path.join(path, doc['name'])
         metadataFile = 'girder-folder-metadata.json'
-        for sub in self.childFolders(parentType='folder', parent=doc, user=user):
+
+        # Eagerly evaluate this list, as the MongoDB cursor can time out on long requests
+        childFolders = list(self.childFolders(
+            parentType='folder', parent=doc, user=user,
+            fields=['name'] + (['meta'] if includeMetadata else [])
+        ))
+        for sub in childFolders:
             if sub['name'] == metadataFile:
                 metadataFile = None
             for (filepath, file) in self.fileList(
                     sub, user, path, includeMetadata, subpath=True,
                     mimeFilter=mimeFilter, data=data):
                 yield (filepath, file)
-        for item in self.childItems(folder=doc):
+
+        # Eagerly evaluate this list, as the MongoDB cursor can time out on long requests
+        childItems = list(self.childItems(
+            folder=doc, fields=['name'] + (['meta'] if includeMetadata else [])
+        ))
+        for item in childItems:
             if item['name'] == metadataFile:
                 metadataFile = None
             for (filepath, file) in itemModel.fileList(
                     item, user, path, includeMetadata, mimeFilter=mimeFilter, data=data):
                 yield (filepath, file)
+
         if includeMetadata and metadataFile and doc.get('meta', {}):
             def stream():
                 yield json.dumps(doc['meta'], default=str)
@@ -750,7 +760,7 @@ class Folder(AccessControlledModel):
             raise ValidationException('The parentType must be folder, '
                                       'collection, or user.')
         if parent is None:
-            parent = self.model(parentType).load(srcFolder['parentId'], force=True)
+            parent = ModelImporter.model(parentType).load(srcFolder['parentId'], force=True)
         if name is None:
             name = srcFolder['name']
         if description is None:
@@ -790,8 +800,12 @@ class Folder(AccessControlledModel):
         from .item import Item
 
         # copy metadata and other extension values
-        filteredFolder = self.filter(newFolder, creator)
         updated = False
+        if srcFolder['meta']:
+            newFolder['meta'] = copy.deepcopy(srcFolder['meta'])
+            updated = True
+
+        filteredFolder = self.filter(newFolder, creator)
         for key in srcFolder:
             if key not in filteredFolder and key not in newFolder:
                 newFolder[key] = copy.deepcopy(srcFolder[key])
@@ -862,13 +876,10 @@ class Folder(AccessControlledModel):
             self, doc, access, user=user, save=save, force=force)
 
         if recurse:
-            cursor = self.find({
+            subfolders = self.findWithPermissions({
                 'parentId': doc['_id'],
                 'parentCollection': 'folder'
-            })
-
-            subfolders = self.filterResultsByPermission(
-                cursor=cursor, user=user, level=AccessType.ADMIN)
+            }, user=user, level=AccessType.ADMIN)
 
             for folder in subfolders:
                 self.setAccessList(
@@ -884,7 +895,7 @@ class Folder(AccessControlledModel):
         :param folder: The folder to check.
         :type folder: dict
         """
-        return not self.model(folder.get('parentCollection')).load(
+        return not ModelImporter.model(folder.get('parentCollection')).load(
             folder.get('parentId'), force=True)
 
     def updateSize(self, doc):

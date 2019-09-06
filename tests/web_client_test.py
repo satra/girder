@@ -1,22 +1,4 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import os
 import six
 import subprocess
@@ -46,14 +28,10 @@ def setUpModule():
     if 's3' in os.environ['ASSETSTORE_TYPE']:
         mockS3 = True
 
-    pluginDir = os.environ.get('PLUGIN_DIR', '')
-
-    if pluginDir:
-        base.mockPluginDir(pluginDir)
-
     plugins = os.environ.get('ENABLED_PLUGINS', '')
     if plugins:
         base.enabledPlugins.extend(plugins.split())
+
     testServer = base.startServer(False, mockS3=mockS3)
 
 
@@ -166,14 +144,14 @@ class WebClientTestCase(base.TestCase):
                 imp.load_source('girder.web_test_setup%d' % i, script)
 
     def testWebClientSpec(self):
-        baseUrl = '/static/built/testing/testEnv.html'
+        baseUrl = '/static/built/testEnv.html'
         if os.environ.get('BASEURL', ''):
             baseUrl = os.environ['BASEURL']
 
         cmd = (
             'npx', 'phantomjs',
             '--web-security=%s' % self.webSecurity,
-            os.path.join(ROOT_DIR, 'clients', 'web', 'test', 'specRunner.js'),
+            os.path.join(ROOT_DIR, 'girder', 'web_client', 'test', 'specRunner.js'),
             'http://localhost:%s%s' % (os.environ['GIRDER_PORT'], baseUrl),
             self.specFile,
             os.environ.get('JASMINE_TIMEOUT', ''),
@@ -189,7 +167,13 @@ class WebClientTestCase(base.TestCase):
         for _ in range(int(retry_count)):
             retry = False
             task = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT_DIR)
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT_DIR,
+                env=dict(
+                    # https://github.com/bazelbuild/rules_closure/pull/353
+                    OPENSSL_CONF='/dev/null',
+                    **os.environ
+                )
+            )
             jasmineFinished = False
             for line in iter(task.stdout.readline, b''):
                 if isinstance(line, six.binary_type):

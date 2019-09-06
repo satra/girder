@@ -1,24 +1,7 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import contextlib
 import girder_client.cli
+import logging
 import mock
 import os
 import requests
@@ -32,7 +15,9 @@ from girder.models.api_key import ApiKey
 from girder.models.folder import Folder
 from girder.models.item import Item
 from girder.models.user import User
+from girder_client.cli import GirderCli
 from tests import base
+from six.moves.http_client import HTTPConnection
 from six import StringIO
 
 os.environ['GIRDER_PORT'] = os.environ.get('GIRDER_TEST_PORT', '20200')
@@ -117,6 +102,9 @@ class PythonCliTestCase(base.TestCase):
         shutil.rmtree(self.downloadDir, ignore_errors=True)
 
     def tearDown(self):
+        logger = logging.getLogger('girder_client')
+        logger.setLevel(logging.ERROR)
+        logger.handlers = []
         shutil.rmtree(self.downloadDir, ignore_errors=True)
 
         base.TestCase.tearDown(self)
@@ -380,9 +368,9 @@ class PythonCliTestCase(base.TestCase):
         _check_upload(invokeCli(['--api-key', self.apiKey['key']] + args))
 
         # Try uploading using API key set with GIRDER_API_KEY env. variable
-        os.environ["GIRDER_API_KEY"] = self.apiKey['key']
+        os.environ['GIRDER_API_KEY'] = self.apiKey['key']
         _check_upload(invokeCli(args))
-        del os.environ["GIRDER_API_KEY"]
+        del os.environ['GIRDER_API_KEY']
 
         # Test localsync, it shouldn't touch files on 2nd pass
         ret = invokeCli(('localsync', str(subfolder['_id']),
@@ -429,3 +417,46 @@ class PythonCliTestCase(base.TestCase):
         ret = invokeCli(args, username='mylogin', password='password')
         self.assertEqual(ret['exitVal'], 0)
         self.assertIn('File hello.txt already exists in parent Item', ret['stdout'])
+
+    def testVerboseLoggingLevel0(self):
+        args = ['localsync', '--help']
+        ret = invokeCli(args, username='mylogin', password='password')
+        self.assertEqual(ret['exitVal'], 0)
+        self.assertEqual(logging.getLogger('girder_client').level, logging.ERROR)
+
+    def testVerboseLoggingLevel1(self):
+        args = ['-v', 'localsync', '--help']
+        ret = invokeCli(args, username='mylogin', password='password')
+        self.assertEqual(ret['exitVal'], 0)
+        self.assertEqual(logging.getLogger('girder_client').level, logging.WARNING)
+
+    def testVerboseLoggingLevel2(self):
+        args = ['-vv', 'localsync', '--help']
+        ret = invokeCli(args, username='mylogin', password='password')
+        self.assertEqual(ret['exitVal'], 0)
+        self.assertEqual(logging.getLogger('girder_client').level, logging.INFO)
+
+    def testVerboseLoggingLevel3(self):
+        args = ['-vvv', 'localsync', '--help']
+        ret = invokeCli(args, username='mylogin', password='password')
+        self.assertEqual(ret['exitVal'], 0)
+        self.assertEqual(logging.getLogger('girder_client').level, logging.DEBUG)
+        self.assertEqual(HTTPConnection.debuglevel, 1)
+
+    def testRetryUpload(self):
+        gc = GirderCli('mylogin', 'password',
+                       host='localhost', port=os.environ['GIRDER_PORT'],
+                       retries=5)
+
+        def checkRetryHandler(*args, **kwargs):
+            session = gc._session
+            self.assertIsNotNone(session)
+            self.assertIn(gc.urlBase, session.adapters)
+            adapter = session.adapters[gc.urlBase]
+            self.assertEqual(adapter.max_retries.total, 5)
+
+        with mock.patch('girder_client.cli.GirderClient.sendRestRequest',
+                        side_effect=checkRetryHandler) as m:
+            gc.sendRestRequest('')
+
+        self.assertTrue(m.called)

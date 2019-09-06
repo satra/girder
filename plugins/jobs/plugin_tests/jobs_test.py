@@ -1,24 +1,7 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import json
 import time
+from bson import json_util
 
 from tests import base
 from girder import events
@@ -27,15 +10,13 @@ from girder.exceptions import ValidationException
 from girder.models.user import User
 from girder.models.token import Token
 
-JobStatus = None
+from girder_jobs.constants import JobStatus, REST_CREATE_JOB_TOKEN_SCOPE
+from girder_jobs.models.job import Job
 
 
 def setUpModule():
     base.enabledPlugins.append('jobs')
     base.startServer()
-
-    global JobStatus, REST_CREATE_JOB_TOKEN_SCOPE
-    from girder.plugins.jobs.constants import JobStatus, REST_CREATE_JOB_TOKEN_SCOPE
 
 
 def tearDownModule():
@@ -50,7 +31,6 @@ class JobsTestCase(base.TestCase):
             'usr' + str(n), 'passwd', 'tst', 'usr', 'u%d@u.com' % n)
             for n in range(3)]
 
-        from girder.plugins.jobs.models.job import Job
         self.jobModel = Job()
 
     def testJobs(self):
@@ -87,6 +67,10 @@ class JobsTestCase(base.TestCase):
         self.assertStatus(resp, 403)
         resp = self.request(path, user=self.users[2], method='DELETE')
         self.assertStatus(resp, 403)
+
+        # If no user is specified, we should get a 401 error
+        resp = self.request(path, user=None)
+        self.assertStatus(resp, 401)
 
         # Make sure user who created the job can see it
         resp = self.request(path, user=self.users[1])
@@ -202,10 +186,6 @@ class JobsTestCase(base.TestCase):
         resp = self.request('/job/all', user=self.users[0])
         self.assertStatusOk(resp)
         self.assertEqual(len(resp.json), 6)
-
-        # Test deprecated listAll method
-        jobs = list(self.jobModel.listAll(limit=0, offset=0, sort=None, currentUser=self.users[0]))
-        self.assertEqual(len(jobs), 6)
 
         # get with filter
         resp = self.request('/job/all', user=self.users[0], params={
@@ -598,3 +578,16 @@ class JobsTestCase(base.TestCase):
             self.jobModel.updateJob(job, status=JobStatus.RUNNING)
         with self.assertRaises(ValidationException):
             self.jobModel.updateJob(job, status=JobStatus.INACTIVE)
+
+    def testJobSaveEventModification(self):
+        def customSave(event):
+            kwargs = json_util.loads(event.info['kwargs'])
+            kwargs['key2'] = 'newvalue'
+            event.info['kwargs'] = json_util.dumps(kwargs)
+
+        job = self.jobModel.createJob(title='A job', type='t', user=self.users[1], public=True)
+
+        job['kwargs'] = {'key1': 'value1', 'key2': 'value2'}
+        with events.bound('model.job.save', 'test', customSave):
+            job = self.jobModel.save(job)
+            self.assertEqual(job['kwargs']['key2'], 'newvalue')

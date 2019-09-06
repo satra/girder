@@ -1,32 +1,19 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-###############################################################################
-#  Copyright 2013 Kitware Inc.
-#
-#  Licensed under the Apache License, Version 2.0 ( the "License" );
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
 import cherrypy
 import json
 import time
 from datetime import datetime
 
 from ..describe import Description, autoDescribeRoute
-from ..rest import Resource, setResponseHeader
+from ..rest import Resource, disableAuditLog, setResponseHeader
+from girder.constants import SortDir
+from girder.exceptions import RestException
 from girder.models.notification import Notification as NotificationModel
+from girder.models.setting import Setting
+from girder.settings import SettingKey
 from girder.utility import JsonEncoder
 from girder.api import access
+
 
 # If no timeout param is passed to stream, we default to this value
 DEFAULT_STREAM_TIMEOUT = 300
@@ -52,9 +39,10 @@ class Notification(Resource):
         super(Notification, self).__init__()
         self.resourceName = 'notification'
         self.route('GET', ('stream',), self.stream)
+        self.route('GET', (), self.listNotifications)
 
-    @access.cookie
-    @access.token
+    @disableAuditLog
+    @access.token(cookie=True)
     @autoDescribeRoute(
         Description('Stream notifications for a given user via the SSE protocol.')
         .notes('This uses long-polling to keep the connection open for '
@@ -71,8 +59,12 @@ class Notification(Resource):
         .produces('text/event-stream')
         .errorResponse()
         .errorResponse('You are not logged in.', 403)
+        .errorResponse('The notification stream is not enabled.', 503)
     )
     def stream(self, timeout, params):
+        if not Setting().get(SettingKey.ENABLE_NOTIFICATION_STREAM):
+            raise RestException('The notification stream is not enabled.', code=503)
+
         user, token = self.getCurrentUser(returnToken=True)
 
         setResponseHeader('Content-Type', 'text/event-stream')
@@ -98,3 +90,19 @@ class Notification(Resource):
 
                 time.sleep(wait)
         return streamGen
+
+    @disableAuditLog
+    @access.token(cookie=True)
+    @autoDescribeRoute(
+        Description('List notification events')
+        .notes('This endpoint can be used for manual long-polling when '
+               'SSE support is disabled or otherwise unavailable. The events are always '
+               'returned in chronological order.')
+        .param('since', 'Filter out events before this date.', required=False, dataType='dateTime')
+        .errorResponse()
+        .errorResponse('You are not logged in.', 403)
+    )
+    def listNotifications(self, since):
+        user, token = self.getCurrentUser(returnToken=True)
+        return list(NotificationModel().get(
+            user, since, token=token, sort=[('updated', SortDir.ASCENDING)]))
